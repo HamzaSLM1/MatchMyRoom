@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, JSON, Float, ForeignKey, Index
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, JSON, Float, ForeignKey, Index, PrimaryKeyConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
@@ -18,6 +18,7 @@ class User(Base):
     program = Column(String(100), nullable=True)  # User's program/faculty of study
     bio = Column(String(500), nullable=True)  # User bio/description
     profile_pic_url = Column(String, nullable=True)  # Cloudinary URL
+    social_links = Column(JSON, nullable=True)  # { instagram, linkedin, twitter }
     questionnaire_completed = Column(Boolean, default=False)
 
     # Email verification
@@ -104,3 +105,48 @@ class Message(Base):
     # Relationships
     sender = relationship("User", foreign_keys=[sender_id], back_populates="sent_messages")
     recipient = relationship("User", foreign_keys=[recipient_id], back_populates="received_messages")
+
+
+# ─── Agent 2 Models ───
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token = Column(String, unique=True, index=True, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    used = Column(Boolean, default=False, nullable=False)
+
+    # Relationship
+    user = relationship("User", foreign_keys=[user_id])
+
+
+class Block(Base):
+    __tablename__ = "blocks"
+
+    blocker_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    blocked_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        PrimaryKeyConstraint("blocker_id", "blocked_id"),
+    )
+
+    # Relationships
+    blocker = relationship("User", foreign_keys=[blocker_id])
+    blocked = relationship("User", foreign_keys=[blocked_id])
+
+
+class Report(Base):
+    __tablename__ = "reports"
+
+    id = Column(Integer, primary_key=True, index=True)
+    reporter_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    reported_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    reason = Column(String, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    # Relationships
+    reporter = relationship("User", foreign_keys=[reporter_id])
+    reported = relationship("User", foreign_keys=[reported_id])

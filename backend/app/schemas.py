@@ -36,6 +36,7 @@ class AuthResponse(BaseModel):
 # ─── Profile Schemas ───
 class ProfileUpdateRequest(BaseModel):
     bio: Optional[str] = Field(None, max_length=500)
+    social_links: Optional[Dict[str, str]] = None
 
 
 class UserProfile(BaseModel):
@@ -46,6 +47,7 @@ class UserProfile(BaseModel):
     program: Optional[str] = None
     bio: Optional[str] = None
     profile_pic_url: Optional[str] = None
+    social_links: Optional[Dict[str, str]] = None
     questionnaire_completed: bool
     created_at: datetime
 
@@ -79,10 +81,15 @@ class MatchResponse(BaseModel):
     profile_pic_url: Optional[str] = None
     bio: Optional[str] = None
     # Questionnaire highlights
-    sleep: Optional[str] = None
-    clean: Optional[str] = None
+    gender: Optional[str] = None
     area: Optional[str] = None
     budget: Optional[str] = None
+    social_links: Optional[Dict[str, str]] = None
+    # Apartment fields
+    has_apartment: Optional[bool] = None
+    spots_available: Optional[str] = None
+    apartment_available: Optional[str] = None
+    apartment_rooms: Optional[str] = None
 
 
 # ─── Message Schemas ───
@@ -156,3 +163,23 @@ class SendInitialMessageRequest(BaseModel):
         if not v or not v.strip():
             raise ValueError("Message cannot be empty")
         return v.strip()
+
+
+# ─── Agent 2 Schemas ───
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(..., min_length=8)
+
+
+class BlockRequest(BaseModel):
+    blocked_user_id: int
+
+
+class ReportRequest(BaseModel):
+    reported_user_id: int
+    reason: str = Field(..., min_length=1, max_length=500)
