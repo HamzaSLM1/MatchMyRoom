@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Request, Query
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Request, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session, joinedload
@@ -34,14 +34,19 @@ from .email_service import send_new_matches_notification, send_welcome_email, se
 load_dotenv()
 
 # ─── Configuration ───
-JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_hex(32))
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError(
+        "JWT_SECRET environment variable is required. "
+        "Set it in your .env file. Use: python -c \"import secrets; print(secrets.token_hex(32))\""
+    )
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 72
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 MAX_VERIFICATION_ATTEMPTS = 5
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
-    "http://localhost:3000,http://localhost:5173,http://localhost:5174,http://localhost:3001"
+    "http://localhost:5173"
 ).split(",")
 
 # Initialize FastAPI app
@@ -70,6 +75,29 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Bearer token scheme
 security = HTTPBearer(auto_error=False)
+
+
+# ─── WebSocket Connection Manager ───
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: dict[int, WebSocket] = {}
+
+    async def connect(self, user_id: int, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections[user_id] = websocket
+
+    def disconnect(self, user_id: int):
+        self.active_connections.pop(user_id, None)
+
+    async def send_to_user(self, user_id: int, message: dict) -> bool:
+        ws = self.active_connections.get(user_id)
+        if ws:
+            await ws.send_json(message)
+            return True
+        return False
+
+
+ws_manager = ConnectionManager()
 
 
 # ─── JWT Helpers ───
@@ -381,6 +409,8 @@ def update_profile(
 
     if data.bio is not None:
         user.bio = data.bio
+    if data.social_links is not None:
+        user.social_links = data.social_links
 
     db.commit()
     db.refresh(user)
@@ -470,8 +500,15 @@ def submit_questionnaire(
 
 # ─── Matching Endpoints ───
 @app.post("/api/matches/calculate")
-def calculate_matches(user_id: int, db: Session = Depends(get_db)):
+def calculate_matches(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     """Calculate and store matches for a user"""
+    if current_user.id != user_id:
+        raise HTTPException(status_code=403, detail="Cannot calculate matches for another user")
+
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -579,13 +616,23 @@ def get_matches(
 
         other_questionnaire = questionnaire_map.get(other_user_id)
 
-        sleep = clean = area = budget = None
+        gender = area = budget = None
+        has_apartment = None
+        spots_available = apartment_available = apartment_rooms = None
         if other_questionnaire:
             responses = other_questionnaire.responses
-            sleep = get_question_text("sleepSchedule", responses.get("sleepSchedule", 0))
-            clean = get_question_text("cleanliness", responses.get("cleanliness", 0))
-            area = get_question_text("location", responses.get("location", 0))
-            budget = get_question_text("budget", responses.get("budget", 0))
+            has_apartment = responses.get("hasApartment") == 0
+            gender = get_question_text("gender", responses.get("gender", 0))
+            if has_apartment:
+                # Show apartment's location and rent instead of preferences
+                area = get_question_text("apartmentLocation", responses.get("apartmentLocation"))
+                budget = get_question_text("apartmentRent", responses.get("apartmentRent"))
+                spots_available = get_question_text("spotsAvailable", responses.get("spotsAvailable"))
+                apartment_available = get_question_text("apartmentAvailable", responses.get("apartmentAvailable"))
+                apartment_rooms = get_question_text("apartmentRooms", responses.get("apartmentRooms"))
+            else:
+                area = get_question_text("location", responses.get("location", 0))
+                budget = get_question_text("budget", responses.get("budget", 0))
 
         result.append(MatchResponse(
             id=match.id,
@@ -596,10 +643,14 @@ def get_matches(
             compatibility_score=match.compatibility_score,
             profile_pic_url=other_user.profile_pic_url,
             bio=other_user.bio,
-            sleep=sleep,
-            clean=clean,
+            gender=gender,
             area=area,
-            budget=budget
+            budget=budget,
+            social_links=other_user.social_links or {},
+            has_apartment=has_apartment,
+            spots_available=spots_available,
+            apartment_available=apartment_available,
+            apartment_rooms=apartment_rooms,
         ))
 
     return result
@@ -710,7 +761,7 @@ def check_like(
 
 # ─── Messaging Endpoints (Authenticated) ───
 @app.post("/api/messages/send")
-def send_message(
+async def send_message(
     sender_id: int,
     data: MessageSendRequest,
     db: Session = Depends(get_db),
@@ -739,6 +790,16 @@ def send_message(
     db.add(message)
     db.commit()
     db.refresh(message)
+
+    # Push via WebSocket if recipient is connected
+    await ws_manager.send_to_user(data.recipient_id, {
+        "type": "new_message",
+        "message_id": message.id,
+        "sender_id": sender_id,
+        "sender_name": current_user.name,
+        "content": data.content,
+        "sent_at": message.sent_at.isoformat(),
+    })
 
     return {"message": "Message sent successfully", "message_id": message.id}
 
@@ -839,6 +900,93 @@ def mark_message_read(
     return {"message": "Message marked as read"}
 
 
+# ─── WebSocket Endpoint ───
+@app.websocket("/api/ws/{user_id}")
+async def websocket_endpoint(websocket: WebSocket, user_id: int, token: str = Query(...)):
+    """WebSocket endpoint for real-time messaging. Authenticate via token query param."""
+    # Validate JWT token
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        token_user_id = payload.get("user_id")
+        if token_user_id != user_id:
+            await websocket.close(code=4003, reason="User ID mismatch")
+            return
+    except jwt.ExpiredSignatureError:
+        await websocket.close(code=4001, reason="Token expired")
+        return
+    except jwt.InvalidTokenError:
+        await websocket.close(code=4001, reason="Invalid token")
+        return
+
+    await ws_manager.connect(user_id, websocket)
+    try:
+        while True:
+            data = await websocket.receive_json()
+
+            # Handle incoming message from WebSocket
+            if data.get("type") == "message":
+                recipient_id = data.get("recipient_id")
+                content = data.get("content", "").strip()
+
+                if not recipient_id or not content:
+                    await websocket.send_json({"type": "error", "detail": "Missing recipient_id or content"})
+                    continue
+
+                if recipient_id == user_id:
+                    await websocket.send_json({"type": "error", "detail": "Cannot message yourself"})
+                    continue
+
+                # Save to database
+                db = next(get_db())
+                try:
+                    recipient = db.query(User).filter(User.id == recipient_id).first()
+                    if not recipient:
+                        await websocket.send_json({"type": "error", "detail": "Recipient not found"})
+                        continue
+
+                    sender = db.query(User).filter(User.id == user_id).first()
+                    message = Message(
+                        sender_id=user_id,
+                        recipient_id=recipient_id,
+                        content=content[:10000]
+                    )
+                    db.add(message)
+                    db.commit()
+                    db.refresh(message)
+
+                    msg_payload = {
+                        "type": "new_message",
+                        "message_id": message.id,
+                        "sender_id": user_id,
+                        "sender_name": sender.name if sender else "Unknown",
+                        "content": content[:10000],
+                        "sent_at": message.sent_at.isoformat(),
+                    }
+
+                    # Forward to recipient if connected
+                    await ws_manager.send_to_user(recipient_id, msg_payload)
+
+                    # Confirm to sender
+                    await websocket.send_json({"type": "message_sent", "message_id": message.id})
+                finally:
+                    db.close()
+
+            elif data.get("type") == "mark_read":
+                message_id = data.get("message_id")
+                if message_id:
+                    db = next(get_db())
+                    try:
+                        msg = db.query(Message).filter(Message.id == message_id).first()
+                        if msg and msg.recipient_id == user_id:
+                            msg.read = True
+                            db.commit()
+                    finally:
+                        db.close()
+
+    except WebSocketDisconnect:
+        ws_manager.disconnect(user_id)
+
+
 # ─── Health Check ───
 @app.get("/api/health")
 def health_check(db: Session = Depends(get_db)):
@@ -853,7 +1001,8 @@ def health_check(db: Session = Depends(get_db)):
 
 # ─── Development: Create Fake Users ───
 @app.post("/api/dev/create-fake-users")
-def create_fake_users(db: Session = Depends(get_db)):
+@limiter.limit("2/minute")
+def create_fake_users(request: Request, db: Session = Depends(get_db)):
     """Create 10 fake users for testing (dev only)"""
     if os.getenv("ENV", "development") == "production":
         raise HTTPException(status_code=403, detail="This endpoint is disabled in production")
@@ -865,7 +1014,7 @@ def create_fake_users(db: Session = Depends(get_db)):
             "university": "mcgill",
             "program": "Engineering",
             "bio": "Third-year engineering student who loves hiking and cooking. Looking for a clean, quiet roommate.",
-            "responses": {"housingType": 1, "gender": 1, "genderPreference": 3, "age": 1, "program": 2, "budget": 1, "location": 0, "religion": 5, "sleepSchedule": 2, "cleanliness": 1, "noise": 0, "guests": 1, "study": 2, "dietary": 0, "workFromHome": 1, "pets": 2, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 1, "genderPreference": 3, "age": 1, "program": 2, "budget": 1, "location": 0, "religion": 5, "sleepSchedule": 2, "cleanliness": 1, "noise": 0, "guests": 1, "study": 2, "dietary": 0, "workFromHome": 1, "pets": 2, "language": 0, "moveIn": 0}
         },
         {
             "name": "Liam Chen",
@@ -873,7 +1022,7 @@ def create_fake_users(db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Commerce/Management",
             "bio": "Business student and gym enthusiast. Social but respectful of personal space.",
-            "responses": {"housingType": 1, "gender": 0, "genderPreference": 3, "age": 0, "program": 3, "budget": 2, "location": 2, "religion": 0, "sleepSchedule": 1, "cleanliness": 1, "noise": 2, "guests": 2, "study": 1, "dietary": 0, "workFromHome": 0, "pets": 0, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 0, "program": 3, "budget": 2, "location": 2, "religion": 0, "sleepSchedule": 1, "cleanliness": 1, "noise": 2, "guests": 2, "study": 1, "dietary": 0, "workFromHome": 0, "pets": 0, "language": 0, "moveIn": 0}
         },
         {
             "name": "Sophia Patel",
@@ -881,7 +1030,7 @@ def create_fake_users(db: Session = Depends(get_db)):
             "university": "mcgill",
             "program": "Science",
             "bio": "Pre-med student who studies a lot. Looking for someone serious about academics.",
-            "responses": {"housingType": 0, "mcgillResidence": 1, "gender": 1, "genderPreference": 1, "age": 1, "program": 1, "budget": 0, "location": 0, "religion": 4, "sleepSchedule": 0, "cleanliness": 0, "noise": 0, "guests": 0, "study": 0, "dietary": 1, "workFromHome": 0, "pets": 3, "language": 2, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 0, "mcgillResidence": 1, "gender": 1, "genderPreference": 1, "age": 1, "program": 1, "budget": 0, "location": 0, "religion": 4, "sleepSchedule": 0, "cleanliness": 0, "noise": 0, "guests": 0, "study": 0, "dietary": 1, "workFromHome": 0, "pets": 3, "language": 2, "moveIn": 0}
         },
         {
             "name": "Noah Tremblay",
@@ -889,7 +1038,7 @@ def create_fake_users(db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Arts",
             "bio": "Art history major and part-time barista. Love music, museums, and good conversations.",
-            "responses": {"housingType": 1, "gender": 0, "genderPreference": 3, "age": 1, "program": 0, "budget": 1, "location": 1, "religion": 0, "sleepSchedule": 2, "cleanliness": 2, "noise": 1, "guests": 2, "study": 1, "dietary": 2, "workFromHome": 2, "pets": 2, "language": 2, "moveIn": 1}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 1, "program": 0, "budget": 1, "location": 1, "religion": 0, "sleepSchedule": 2, "cleanliness": 2, "noise": 1, "guests": 2, "study": 1, "dietary": 2, "workFromHome": 2, "pets": 2, "language": 2, "moveIn": 1}
         },
         {
             "name": "Olivia Martinez",
@@ -897,7 +1046,7 @@ def create_fake_users(db: Session = Depends(get_db)):
             "university": "mcgill",
             "program": "Law",
             "bio": "Law student looking for a quiet study environment. I'm organized and respectful.",
-            "responses": {"housingType": 0, "mcgillResidence": 1, "gender": 1, "genderPreference": 1, "age": 2, "program": 5, "budget": 2, "location": 0, "religion": 1, "sleepSchedule": 0, "cleanliness": 0, "noise": 0, "guests": 0, "study": 0, "dietary": 0, "workFromHome": 1, "pets": 0, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 0, "mcgillResidence": 1, "gender": 1, "genderPreference": 1, "age": 2, "program": 5, "budget": 2, "location": 0, "religion": 1, "sleepSchedule": 0, "cleanliness": 0, "noise": 0, "guests": 0, "study": 0, "dietary": 0, "workFromHome": 1, "pets": 0, "language": 0, "moveIn": 0}
         },
         {
             "name": "Ethan Kim",
@@ -905,7 +1054,7 @@ def create_fake_users(db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Engineering",
             "bio": "Computer engineering student and gamer. Night owl who's chill and easy-going.",
-            "responses": {"housingType": 1, "gender": 0, "genderPreference": 3, "age": 0, "program": 2, "budget": 1, "location": 4, "religion": 0, "sleepSchedule": 1, "cleanliness": 2, "noise": 1, "guests": 1, "study": 2, "dietary": 0, "workFromHome": 3, "pets": 2, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 0, "program": 2, "budget": 1, "location": 4, "religion": 0, "sleepSchedule": 1, "cleanliness": 2, "noise": 1, "guests": 1, "study": 2, "dietary": 0, "workFromHome": 3, "pets": 2, "language": 0, "moveIn": 0}
         },
         {
             "name": "Ava Leblanc",
@@ -913,7 +1062,7 @@ def create_fake_users(db: Session = Depends(get_db)):
             "university": "mcgill",
             "program": "Music",
             "bio": "Music performance student. I practice piano daily but use headphones! Love cats.",
-            "responses": {"housingType": 0, "mcgillResidence": 0, "gender": 1, "genderPreference": 3, "age": 0, "program": 6, "budget": 0, "location": 1, "religion": 0, "sleepSchedule": 2, "cleanliness": 1, "noise": 1, "guests": 1, "study": 2, "dietary": 2, "workFromHome": 1, "pets": 1, "language": 2, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 0, "mcgillResidence": 0, "gender": 1, "genderPreference": 3, "age": 0, "program": 6, "budget": 0, "location": 1, "religion": 0, "sleepSchedule": 2, "cleanliness": 1, "noise": 1, "guests": 1, "study": 2, "dietary": 2, "workFromHome": 1, "pets": 1, "language": 2, "moveIn": 0}
         },
         {
             "name": "Mason Williams",
@@ -921,7 +1070,7 @@ def create_fake_users(db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Science",
             "bio": "Biology major and fitness enthusiast. Early riser who keeps things clean and organized.",
-            "responses": {"housingType": 1, "gender": 0, "genderPreference": 3, "age": 1, "program": 1, "budget": 1, "location": 3, "religion": 1, "sleepSchedule": 0, "cleanliness": 0, "noise": 1, "guests": 1, "study": 1, "dietary": 3, "workFromHome": 0, "pets": 2, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 1, "program": 1, "budget": 1, "location": 3, "religion": 1, "sleepSchedule": 0, "cleanliness": 0, "noise": 1, "guests": 1, "study": 1, "dietary": 3, "workFromHome": 0, "pets": 2, "language": 0, "moveIn": 0}
         },
         {
             "name": "Isabella Nguyen",
@@ -929,7 +1078,7 @@ def create_fake_users(db: Session = Depends(get_db)):
             "university": "mcgill",
             "program": "Commerce/Management",
             "bio": "Marketing major and social butterfly. Love hosting small gatherings and trying new recipes.",
-            "responses": {"housingType": 1, "gender": 1, "genderPreference": 3, "age": 1, "program": 3, "budget": 2, "location": 2, "religion": 2, "sleepSchedule": 2, "cleanliness": 1, "noise": 2, "guests": 3, "study": 1, "dietary": 0, "workFromHome": 2, "pets": 2, "language": 0, "moveIn": 1}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 1, "genderPreference": 3, "age": 1, "program": 3, "budget": 2, "location": 2, "religion": 2, "sleepSchedule": 2, "cleanliness": 1, "noise": 2, "guests": 3, "study": 1, "dietary": 0, "workFromHome": 2, "pets": 2, "language": 0, "moveIn": 1}
         },
         {
             "name": "James Anderson",
@@ -937,7 +1086,7 @@ def create_fake_users(db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Education",
             "bio": "Education student and aspiring teacher. Friendly, responsible, and drama-free.",
-            "responses": {"housingType": 1, "gender": 0, "genderPreference": 3, "age": 2, "program": 7, "budget": 1, "location": 0, "religion": 1, "sleepSchedule": 0, "cleanliness": 1, "noise": 1, "guests": 2, "study": 2, "dietary": 0, "workFromHome": 1, "pets": 2, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 2, "program": 7, "budget": 1, "location": 0, "religion": 1, "sleepSchedule": 0, "cleanliness": 1, "noise": 1, "guests": 2, "study": 2, "dietary": 0, "workFromHome": 1, "pets": 2, "language": 0, "moveIn": 0}
         }
     ]
 
