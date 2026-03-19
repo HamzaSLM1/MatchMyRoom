@@ -1,5 +1,15 @@
+"""
+Tests for startup environment variable validation.
+
+Note: These tests verify that the JWT_SECRET and DATABASE_URL validations are
+present in the code and work correctly when env vars are controlled. In practice,
+load_dotenv() in main.py may load from backend/.env during testing — so the
+"required at startup" test mocks load_dotenv to prevent it from overriding the
+controlled environment.
+"""
 import pytest
 import sys
+from unittest.mock import patch
 
 
 def reload_main(monkeypatch, env_overrides):
@@ -20,8 +30,10 @@ def test_jwt_secret_required_at_startup(monkeypatch):
         "DATABASE_URL": "sqlite:///./test_jwt_check.db",
         "JWT_SECRET": None,  # unset
     })
-    with pytest.raises(RuntimeError, match="JWT_SECRET"):
-        import backend.app.main  # noqa: F401
+    # Patch load_dotenv so it doesn't re-load JWT_SECRET from backend/.env
+    with patch("dotenv.load_dotenv", return_value=None):
+        with pytest.raises(RuntimeError, match="JWT_SECRET"):
+            import backend.app.main  # noqa: F401
 
 
 def test_jwt_secret_accepted_when_set(monkeypatch):
