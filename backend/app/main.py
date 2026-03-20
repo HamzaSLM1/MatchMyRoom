@@ -820,7 +820,7 @@ async def send_message(
     message = Message(
         sender_id=sender_id,
         recipient_id=data.recipient_id,
-        content=data.content
+        content=data.content[:10000]
     )
 
     db.add(message)
@@ -987,6 +987,12 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int, token: str = Qu
                         await websocket.send_json({"type": "error", "detail": "Recipient not found"})
                         continue
 
+                    # Block check: prevent messaging if either user has blocked the other
+                    blocked_ids = get_blocked_user_ids(user_id, db)
+                    if recipient_id in blocked_ids:
+                        await websocket.send_json({"type": "error", "detail": "Cannot send message to this user"})
+                        continue
+
                     sender = db.query(User).filter(User.id == user_id).first()
                     message = Message(
                         sender_id=user_id,
@@ -1057,7 +1063,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "mcgill",
             "program": "Engineering",
             "bio": "Third-year engineering student who loves hiking and cooking. Looking for a clean, quiet roommate.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 1, "genderPreference": 3, "age": 1, "program": 2, "budget": 1, "location": 0, "religion": 5, "sleepSchedule": 2, "cleanliness": 1, "noise": 0, "guests": 1, "study": 2, "dietary": 0, "workFromHome": 1, "pets": 2, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 1, "genderPreference": 2, "age": 1, "program": 2, "budget": 1, "location": 0, "religion": 5, "sleepSchedule": 2, "cleanliness": 1, "noise": 0, "guests": 1, "study": 2, "dietary": 0, "workFromHome": 1, "pets": 2, "language": 0, "moveIn": 0}
         },
         {
             "name": "Liam Chen",
@@ -1065,7 +1071,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Commerce/Management",
             "bio": "Business student and gym enthusiast. Social but respectful of personal space.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 0, "program": 3, "budget": 2, "location": 2, "religion": 0, "sleepSchedule": 1, "cleanliness": 1, "noise": 2, "guests": 2, "study": 1, "dietary": 0, "workFromHome": 0, "pets": 0, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 2, "age": 0, "program": 3, "budget": 2, "location": 2, "religion": 0, "sleepSchedule": 1, "cleanliness": 1, "noise": 2, "guests": 2, "study": 1, "dietary": 0, "workFromHome": 0, "pets": 0, "language": 0, "moveIn": 0}
         },
         {
             "name": "Sophia Patel",
@@ -1081,7 +1087,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Arts",
             "bio": "Art history major and part-time barista. Love music, museums, and good conversations.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 1, "program": 0, "budget": 1, "location": 1, "religion": 0, "sleepSchedule": 2, "cleanliness": 2, "noise": 1, "guests": 2, "study": 1, "dietary": 2, "workFromHome": 2, "pets": 2, "language": 2, "moveIn": 1}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 2, "age": 1, "program": 0, "budget": 1, "location": 1, "religion": 0, "sleepSchedule": 2, "cleanliness": 2, "noise": 1, "guests": 2, "study": 1, "dietary": 2, "workFromHome": 2, "pets": 2, "language": 2, "moveIn": 1}
         },
         {
             "name": "Olivia Martinez",
@@ -1097,7 +1103,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Engineering",
             "bio": "Computer engineering student and gamer. Night owl who's chill and easy-going.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 0, "program": 2, "budget": 1, "location": 4, "religion": 0, "sleepSchedule": 1, "cleanliness": 2, "noise": 1, "guests": 1, "study": 2, "dietary": 0, "workFromHome": 3, "pets": 2, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 2, "age": 0, "program": 2, "budget": 1, "location": 4, "religion": 0, "sleepSchedule": 1, "cleanliness": 2, "noise": 1, "guests": 1, "study": 2, "dietary": 0, "workFromHome": 3, "pets": 2, "language": 0, "moveIn": 0}
         },
         {
             "name": "Ava Leblanc",
@@ -1105,7 +1111,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "mcgill",
             "program": "Music",
             "bio": "Music performance student. I practice piano daily but use headphones! Love cats.",
-            "responses": {"hasApartment": 1, "livingLocation": 0, "mcgillResidence": 0, "gender": 1, "genderPreference": 3, "age": 0, "program": 6, "budget": 0, "location": 1, "religion": 0, "sleepSchedule": 2, "cleanliness": 1, "noise": 1, "guests": 1, "study": 2, "dietary": 2, "workFromHome": 1, "pets": 1, "language": 2, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 0, "mcgillResidence": 0, "gender": 1, "genderPreference": 2, "age": 0, "program": 6, "budget": 0, "location": 1, "religion": 0, "sleepSchedule": 2, "cleanliness": 1, "noise": 1, "guests": 1, "study": 2, "dietary": 2, "workFromHome": 1, "pets": 1, "language": 2, "moveIn": 0}
         },
         {
             "name": "Mason Williams",
@@ -1113,7 +1119,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Science",
             "bio": "Biology major and fitness enthusiast. Early riser who keeps things clean and organized.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 1, "program": 1, "budget": 1, "location": 3, "religion": 1, "sleepSchedule": 0, "cleanliness": 0, "noise": 1, "guests": 1, "study": 1, "dietary": 3, "workFromHome": 0, "pets": 2, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 2, "age": 1, "program": 1, "budget": 1, "location": 3, "religion": 1, "sleepSchedule": 0, "cleanliness": 0, "noise": 1, "guests": 1, "study": 1, "dietary": 3, "workFromHome": 0, "pets": 2, "language": 0, "moveIn": 0}
         },
         {
             "name": "Isabella Nguyen",
@@ -1121,7 +1127,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "mcgill",
             "program": "Commerce/Management",
             "bio": "Marketing major and social butterfly. Love hosting small gatherings and trying new recipes.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 1, "genderPreference": 3, "age": 1, "program": 3, "budget": 2, "location": 2, "religion": 2, "sleepSchedule": 2, "cleanliness": 1, "noise": 2, "guests": 3, "study": 1, "dietary": 0, "workFromHome": 2, "pets": 2, "language": 0, "moveIn": 1}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 1, "genderPreference": 2, "age": 1, "program": 3, "budget": 2, "location": 2, "religion": 2, "sleepSchedule": 2, "cleanliness": 1, "noise": 2, "guests": 3, "study": 1, "dietary": 0, "workFromHome": 2, "pets": 2, "language": 0, "moveIn": 1}
         },
         {
             "name": "James Anderson",
@@ -1129,7 +1135,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Education",
             "bio": "Education student and aspiring teacher. Friendly, responsible, and drama-free.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 2, "program": 7, "budget": 1, "location": 0, "religion": 1, "sleepSchedule": 0, "cleanliness": 1, "noise": 1, "guests": 2, "study": 2, "dietary": 0, "workFromHome": 1, "pets": 2, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 2, "age": 2, "program": 7, "budget": 1, "location": 0, "religion": 1, "sleepSchedule": 0, "cleanliness": 1, "noise": 1, "guests": 2, "study": 2, "dietary": 0, "workFromHome": 1, "pets": 2, "language": 0, "moveIn": 0}
         }
     ]
 
