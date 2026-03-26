@@ -14,6 +14,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from datetime import datetime, timedelta, timezone
 import threading
+import anthropic
 
 from .database import get_db, init_db
 from .models import User, QuestionnaireResponse, Match, Message, Like, PasswordResetToken, Block, Report
@@ -384,6 +385,50 @@ def resend_verification_code(request: Request, data: ResendCodeRequest, db: Sess
 
 
 # ─── Profile Endpoints (Authenticated) ───
+
+# Feature 12: Public profile endpoint — no auth required.
+# IMPORTANT: this must be declared BEFORE /api/profile/{user_id} so FastAPI
+# does not interpret the literal string "public" as a user_id integer.
+@app.get("/api/profile/public/{share_token}")
+def get_public_profile(share_token: str, db: Session = Depends(get_db)):
+    """Get a public profile by share token — no auth required"""
+    user = db.query(User).filter(User.share_token == share_token).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    return {
+        "first_name": user.name.split()[0] if user.name else "",
+        "last_name": " ".join(user.name.split()[1:]) if user.name and len(user.name.split()) > 1 else "",
+        "university": user.university,
+        "bio": user.bio,
+        "profile_pic_url": user.profile_pic_url,
+        "share_token": user.share_token,
+    }
+
+
+# Feature 12: Share token endpoint — authenticated, own profile only.
+# Also declared before /{user_id} to avoid route conflicts.
+@app.get("/api/profile/{user_id}/share-token")
+def get_share_token(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get or generate a shareable profile token for the user"""
+    if current_user.id != user_id:
+        raise HTTPException(status_code=403, detail="Cannot get share token for another user")
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if not user.share_token:
+        user.share_token = secrets.token_urlsafe(9)  # ~12 chars
+        db.commit()
+
+    return {"share_token": user.share_token, "share_url": f"/profile/share/{user.share_token}"}
+
+
 @app.get("/api/profile/{user_id}", response_model=UserProfile)
 def get_profile(
     user_id: int,
@@ -394,7 +439,24 @@ def get_profile(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return user
+
+    # Feature 3: compute is_online — True when last_seen is None AND user has an active WS connection
+    is_online = (user.last_seen is None) and (user.id in ws_manager.active_connections)
+
+    return UserProfile(
+        id=user.id,
+        name=user.name,
+        email=user.email,
+        university=user.university,
+        program=user.program,
+        bio=user.bio,
+        profile_pic_url=user.profile_pic_url,
+        social_links=user.social_links,
+        questionnaire_completed=user.questionnaire_completed,
+        created_at=user.created_at,
+        last_seen=user.last_seen,
+        is_online=is_online,
+    )
 
 
 @app.post("/api/profile/update")
@@ -455,8 +517,10 @@ async def upload_picture(
         delete_profile_picture(user.id)
 
     # Upload to Cloudinary
-    picture_url = await upload_profile_picture(file_content, user.id)
+    picture_url, rejection_reason = await upload_profile_picture(file_content, user.id)
 
+    if rejection_reason == "rejected":
+        raise HTTPException(status_code=400, detail="Image was rejected by content moderation. Please upload an appropriate profile photo.")
     if not picture_url:
         raise HTTPException(status_code=500, detail="Failed to upload image to Cloudinary")
 
@@ -466,6 +530,59 @@ async def upload_picture(
     db.refresh(user)
 
     return {"message": "Profile picture uploaded successfully", "url": picture_url}
+
+
+# ─── Private helper: recalculate matches without sending emails (Feature 15) ───
+def _recalculate_matches_for_user(user_id: int, db: Session) -> None:
+    """Recalculate all match scores for a user — silent, no emails, no notifications."""
+    user_questionnaire = db.query(QuestionnaireResponse).filter(
+        QuestionnaireResponse.user_id == user_id
+    ).first()
+    if not user_questionnaire:
+        return
+
+    # Cap at 500 to prevent OOM on large datasets (mirrors calculate_matches endpoint)
+    other_users = db.query(User).options(
+        joinedload(User.questionnaire)
+    ).filter(
+        User.id != user_id,
+        User.questionnaire_completed == True
+    ).limit(500).all()
+
+    for other_user in other_users:
+        if not other_user.questionnaire:
+            continue
+
+        score = calculate_compatibility(
+            user_questionnaire.responses,
+            other_user.questionnaire.responses
+        )
+
+        if score > 50:
+            # Skip if either user has blocked the other
+            blocked_ids = get_blocked_user_ids(user_id, db)
+            if other_user.id in blocked_ids:
+                continue
+
+            user_a_id = min(user_id, other_user.id)
+            user_b_id = max(user_id, other_user.id)
+
+            existing_match = db.query(Match).filter(
+                Match.user1_id == user_a_id,
+                Match.user2_id == user_b_id
+            ).first()
+
+            if existing_match:
+                existing_match.compatibility_score = score
+            else:
+                new_match = Match(
+                    user1_id=user_a_id,
+                    user2_id=user_b_id,
+                    compatibility_score=score
+                )
+                db.add(new_match)
+
+    db.commit()
 
 
 # ─── Questionnaire Endpoints (Authenticated) ───
@@ -503,6 +620,10 @@ def submit_questionnaire(
     user.questionnaire_completed = True
     db.commit()
 
+    # Feature 15: If this is a retake, silently recalculate matches (no emails)
+    if existing:
+        _recalculate_matches_for_user(user_id, db)
+
     return {"message": "Questionnaire submitted successfully"}
 
 
@@ -531,13 +652,14 @@ def calculate_matches(
     if not user_questionnaire:
         raise HTTPException(status_code=400, detail="Please complete the questionnaire first")
 
-    # Get all other users with completed questionnaires (eager load questionnaires)
+    # Get other users with completed questionnaires (eager load questionnaires)
+    # Capped at 500 to prevent OOM on large datasets
     other_users = db.query(User).options(
         joinedload(User.questionnaire)
     ).filter(
         User.id != user_id,
         User.questionnaire_completed == True
-    ).all()
+    ).limit(500).all()
 
     # Calculate compatibility scores
     matches_created = 0
@@ -683,6 +805,87 @@ def get_matches(
     return result
 
 
+# ─── Feature 22: AI Match Explanation ───
+@app.get("/api/matches/explain/{user_id}/{other_user_id}")
+@limiter.limit("10/minute")
+def explain_match(
+    request: Request,
+    user_id: int,
+    other_user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Generate an AI-powered natural language explanation of why two users match"""
+    if current_user.id != user_id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    # Get both users and their questionnaires
+    user = db.query(User).filter(User.id == user_id).first()
+    other_user = db.query(User).filter(User.id == other_user_id).first()
+    if not user or not other_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user_q = db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == user_id).first()
+    other_q = db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == other_user_id).first()
+    if not user_q or not other_q:
+        raise HTTPException(status_code=400, detail="Both users must have completed questionnaires")
+
+    # Check that the match actually exists
+    user_a_id = min(user_id, other_user_id)
+    user_b_id = max(user_id, other_user_id)
+    match = db.query(Match).filter(
+        Match.user1_id == user_a_id,
+        Match.user2_id == user_b_id
+    ).first()
+    if not match:
+        raise HTTPException(status_code=404, detail="No match found between these users")
+
+    # Build the prompt with questionnaire data
+    def format_responses(responses: dict) -> str:
+        lines = []
+        for key, value in responses.items():
+            label = get_question_text(key)
+            if label:
+                lines.append(f"- {label}: {value}")
+        return "\n".join(lines) if lines else "No responses"
+
+    user_prefs = format_responses(user_q.responses)
+    other_prefs = format_responses(other_q.responses)
+
+    parts_a = user.name.split() if user.name else []
+    first_name_a = parts_a[0] if parts_a else "User A"
+    parts_b = other_user.name.split() if other_user.name else []
+    first_name_b = parts_b[0] if parts_b else "User B"
+
+    prompt = f"""You are a friendly roommate matching assistant for Montreal university students.
+
+Two students matched with a {match.compatibility_score:.0f}% compatibility score. Write a warm, concise 2-3 sentence explanation of why they're a good match and what their main difference is (if any). Be specific — reference their actual preferences. Be encouraging but honest.
+
+{first_name_a}'s preferences:
+{user_prefs}
+
+{first_name_b}'s preferences:
+{other_prefs}
+
+Write the explanation directly (no preamble like "Here is..." or "Based on..."). Start with what they have in common."""
+
+    try:
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=503, detail="AI explanations not configured")
+
+        ai_client = anthropic.Anthropic(api_key=api_key)
+        response = ai_client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        explanation = response.content[0].text
+        return {"explanation": explanation, "compatibility_score": match.compatibility_score}
+    except anthropic.APIError as e:
+        raise HTTPException(status_code=503, detail="AI service temporarily unavailable")
+
+
 # ─── Swipe/Like Endpoints (Authenticated) ───
 @app.post("/api/swipes/like", response_model=SwipeResponse)
 @limiter.limit("60/minute")
@@ -788,6 +991,52 @@ def check_like(
     return {"has_liked": like is not None}
 
 
+@app.get("/api/swipes/history/{user_id}")
+def get_swipe_history(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get all users this person has liked (swiped right on)"""
+    if current_user.id != user_id:
+        raise HTTPException(status_code=403, detail="Cannot view another user's swipes")
+
+    likes = db.query(Like).filter(
+        Like.user_id == user_id,
+        Like.is_like == True
+    ).order_by(Like.created_at.desc()).all()
+
+    liked_user_ids = [l.liked_user_id for l in likes]
+    if not liked_user_ids:
+        return []
+
+    users = db.query(User).filter(User.id.in_(liked_user_ids)).all()
+    users_map = {u.id: u for u in users}
+
+    mutual_likes = db.query(Like).filter(
+        Like.user_id.in_(liked_user_ids),
+        Like.liked_user_id == user_id,
+        Like.is_like == True
+    ).all()
+    mutual_ids = {l.user_id for l in mutual_likes}
+
+    result = []
+    for like in likes:
+        u = users_map.get(like.liked_user_id)
+        if not u:
+            continue
+        result.append({
+            "user_id": u.id,
+            "name": u.name,
+            "university": u.university,
+            "profile_pic_url": u.profile_pic_url,
+            "program": u.program,
+            "is_mutual": like.liked_user_id in mutual_ids,
+            "swiped_at": like.created_at.isoformat() if like.created_at else None
+        })
+    return result
+
+
 # ─── Messaging Endpoints (Authenticated) ───
 @app.post("/api/messages/send")
 @limiter.limit("30/minute")
@@ -841,7 +1090,9 @@ async def send_message(
 
 
 @app.get("/api/messages/conversations/{user_id}", response_model=List[ConversationPreview])
+@limiter.limit("30/minute")
 def get_conversations(
+    request: Request,
     user_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -849,15 +1100,28 @@ def get_conversations(
     """Get all conversations for a user with previews"""
     if current_user.id != user_id:
         raise HTTPException(status_code=403, detail="Cannot view another user's conversations")
-    sent_to = db.query(Message.recipient_id).filter(Message.sender_id == user_id).distinct().all()
-    received_from = db.query(Message.sender_id).filter(Message.recipient_id == user_id).distinct().all()
 
     # Get blocked user IDs (bidirectional) to filter out from threads.
     # Note: existing message rows are NOT deleted when a block is created — they are
     # hidden here at the API layer. If the block is later removed, threads reappear.
     blocked_ids = get_blocked_user_ids(user_id, db)
 
-    other_user_ids = set([id[0] for id in sent_to] + [id[0] for id in received_from])
+    # Single query: fetch all messages in the user's conversations (replaces N+1 queries)
+    all_messages = db.query(Message).filter(
+        (Message.sender_id == user_id) | (Message.recipient_id == user_id)
+    ).order_by(Message.sent_at.desc()).all()
+
+    # Build last_message and unread_count maps in Python from the single result set
+    last_message_map = {}
+    unread_count_map = {}
+    for msg in all_messages:
+        partner = msg.recipient_id if msg.sender_id == user_id else msg.sender_id
+        if partner not in last_message_map:
+            last_message_map[partner] = msg  # desc-ordered, so first seen is latest
+        if msg.recipient_id == user_id and not msg.read:
+            unread_count_map[partner] = unread_count_map.get(partner, 0) + 1
+
+    other_user_ids = set(last_message_map.keys())
     # Filter out blocked users from the conversation list
     other_user_ids = other_user_ids - blocked_ids
 
@@ -871,26 +1135,17 @@ def get_conversations(
         if not other_user:
             continue
 
-        last_message = db.query(Message).filter(
-            ((Message.sender_id == user_id) & (Message.recipient_id == other_user_id)) |
-            ((Message.sender_id == other_user_id) & (Message.recipient_id == user_id))
-        ).order_by(Message.sent_at.desc()).first()
+        last_message = last_message_map[other_user_id]
+        unread_count = unread_count_map.get(other_user_id, 0)
 
-        unread_count = db.query(Message).filter(
-            Message.sender_id == other_user_id,
-            Message.recipient_id == user_id,
-            Message.read == False
-        ).count()
-
-        if last_message:
-            conversations.append(ConversationPreview(
-                user_id=other_user.id,
-                name=other_user.name,
-                profile_pic_url=other_user.profile_pic_url,
-                last_message=last_message.content[:50] + "..." if len(last_message.content) > 50 else last_message.content,
-                last_message_time=last_message.sent_at,
-                unread_count=unread_count
-            ))
+        conversations.append(ConversationPreview(
+            user_id=other_user.id,
+            name=other_user.name,
+            profile_pic_url=other_user.profile_pic_url,
+            last_message=last_message.content[:50] + "..." if len(last_message.content) > 50 else last_message.content,
+            last_message_time=last_message.sent_at,
+            unread_count=unread_count
+        ))
 
     conversations.sort(key=lambda x: x.last_message_time, reverse=True)
     return conversations
@@ -900,17 +1155,20 @@ def get_conversations(
 def get_message_thread(
     user_id: int,
     other_user_id: int,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get all messages between two users"""
+    """Get paginated messages between two users"""
     if current_user.id != user_id:
         raise HTTPException(status_code=403, detail="Cannot view another user's messages")
 
     messages = db.query(Message).filter(
         ((Message.sender_id == user_id) & (Message.recipient_id == other_user_id)) |
         ((Message.sender_id == other_user_id) & (Message.recipient_id == user_id))
-    ).order_by(Message.sent_at.asc()).all()
+    ).order_by(Message.sent_at.desc()).offset(skip).limit(limit).all()
+    messages.reverse()  # Show oldest-first within the fetched page
 
     # Mark messages from other user as read
     db.query(Message).filter(
@@ -962,12 +1220,43 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int, token: str = Qu
         return
 
     await ws_manager.connect(user_id, websocket)
+
+    # Feature 3: mark user as currently online (last_seen = None means "online right now")
+    _ws_db = next(get_db())
+    try:
+        db_user = _ws_db.query(User).filter(User.id == user_id).first()
+        if db_user:
+            db_user.last_seen = None
+            _ws_db.commit()
+    finally:
+        _ws_db.close()
+
     try:
         while True:
             data = await websocket.receive_json()
+            msg_type = data.get("type", "message")
+
+            # Feature 4: typing indicators — forward to recipient, do not persist
+            if msg_type == "typing":
+                recipient_id = data.get("recipient_id")
+                if recipient_id:
+                    await ws_manager.send_to_user(recipient_id, {
+                        "type": "typing",
+                        "sender_id": user_id
+                    })
+                continue
+
+            elif msg_type == "stop_typing":
+                recipient_id = data.get("recipient_id")
+                if recipient_id:
+                    await ws_manager.send_to_user(recipient_id, {
+                        "type": "stop_typing",
+                        "sender_id": user_id
+                    })
+                continue
 
             # Handle incoming message from WebSocket
-            if data.get("type") == "message":
+            if msg_type == "message":
                 recipient_id = data.get("recipient_id")
                 content = data.get("content", "").strip()
 
@@ -1020,7 +1309,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int, token: str = Qu
                 finally:
                     db.close()
 
-            elif data.get("type") == "mark_read":
+            elif msg_type == "mark_read":
                 message_id = data.get("message_id")
                 if message_id:
                     db = next(get_db())
@@ -1034,6 +1323,15 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int, token: str = Qu
 
     except WebSocketDisconnect:
         ws_manager.disconnect(user_id)
+        # Feature 3: record when the user went offline
+        _ws_db = next(get_db())
+        try:
+            db_user = _ws_db.query(User).filter(User.id == user_id).first()
+            if db_user:
+                db_user.last_seen = datetime.now(timezone.utc)
+                _ws_db.commit()
+        finally:
+            _ws_db.close()
 
 
 # ─── Health Check ───
