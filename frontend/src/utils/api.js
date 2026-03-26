@@ -88,6 +88,9 @@ export const recordSwipe = (userId, likedUserId, isLike, token) =>
     body: JSON.stringify({ liked_user_id: likedUserId, is_like: isLike }),
   }, token);
 
+export const getSwipeHistory = (userId, token) =>
+  authFetch(`${API_BASE}/swipes/history/${userId}`, {}, token);
+
 // Messages
 export const sendMessage = (senderId, recipientId, content, token) =>
   authFetch(`${API_BASE}/messages/send?sender_id=${senderId}`, {
