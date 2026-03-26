@@ -50,6 +50,8 @@ class UserProfile(BaseModel):
     social_links: Optional[Dict[str, str]] = None
     questionnaire_completed: bool
     created_at: datetime
+    last_seen: Optional[datetime] = None  # Feature 3: last seen tracking
+    is_online: Optional[bool] = False     # Feature 3: True when last_seen is None and WS connected
 
     class Config:
         from_attributes = True
@@ -151,6 +153,19 @@ class SwipeResponse(BaseModel):
     message: str
     is_mutual_match: bool = False  # True if both users have liked each other
     match_name: Optional[str] = None  # Name of the person who previously liked this user
+
+
+class SwipeHistoryItem(BaseModel):
+    user_id: int
+    name: Optional[str] = None
+    university: Optional[str] = None
+    profile_pic_url: Optional[str] = None
+    program: Optional[str] = None
+    is_mutual: bool
+    swiped_at: Optional[str] = None
+
+    class Config:
+        from_attributes = True
 
 
 class SendInitialMessageRequest(BaseModel):
