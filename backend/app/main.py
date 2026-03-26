@@ -25,7 +25,7 @@ from .schemas import (
     MatchResponse,
     MessageSendRequest, MessageResponse, ConversationPreview,
     VerifyEmailRequest, VerifyEmailResponse, ResendCodeRequest,
-    SwipeRequest, SwipeResponse, SendInitialMessageRequest,
+    SwipeRequest, SwipeResponse, SwipeHistoryItem, SendInitialMessageRequest,
     ForgotPasswordRequest, ResetPasswordRequest, BlockRequest, ReportRequest
 )
 from .matching import calculate_compatibility, get_question_text
@@ -991,8 +991,10 @@ def check_like(
     return {"has_liked": like is not None}
 
 
-@app.get("/api/swipes/history/{user_id}")
+@app.get("/api/swipes/history/{user_id}", response_model=List[SwipeHistoryItem])
+@limiter.limit("30/minute")
 def get_swipe_history(
+    request: Request,
     user_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -1007,6 +1009,12 @@ def get_swipe_history(
     ).order_by(Like.created_at.desc()).all()
 
     liked_user_ids = [l.liked_user_id for l in likes]
+    if not liked_user_ids:
+        return []
+
+    # Filter out blocked users
+    blocked_ids = get_blocked_user_ids(user_id, db)
+    liked_user_ids = [uid for uid in liked_user_ids if uid not in blocked_ids]
     if not liked_user_ids:
         return []
 
@@ -1025,15 +1033,15 @@ def get_swipe_history(
         u = users_map.get(like.liked_user_id)
         if not u:
             continue
-        result.append({
-            "user_id": u.id,
-            "name": u.name,
-            "university": u.university,
-            "profile_pic_url": u.profile_pic_url,
-            "program": u.program,
-            "is_mutual": like.liked_user_id in mutual_ids,
-            "swiped_at": like.created_at.isoformat() if like.created_at else None
-        })
+        result.append(SwipeHistoryItem(
+            user_id=u.id,
+            name=u.name,
+            university=u.university,
+            profile_pic_url=u.profile_pic_url,
+            program=u.program,
+            is_mutual=like.liked_user_id in mutual_ids,
+            swiped_at=like.created_at.isoformat() if like.created_at else None
+        ))
     return result
 
 
