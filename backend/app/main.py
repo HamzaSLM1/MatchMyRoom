@@ -211,6 +211,16 @@ def generate_verification_code() -> str:
 @limiter.limit("5/minute")
 def signup(request: Request, data: SignupRequest, db: Session = Depends(get_db)):
     """Create a new user account"""
+    import traceback
+    try:
+        return _signup_impl(request, data, db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"SIGNUP ERROR: {traceback.format_exc()}", flush=True)
+        raise HTTPException(status_code=500, detail=f"Signup failed: {str(e)}")
+
+def _signup_impl(request: Request, data: SignupRequest, db: Session):
     email = data.email.lower()
 
     # Validate university email
