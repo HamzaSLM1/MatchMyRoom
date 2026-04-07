@@ -1,9 +1,23 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { C, font } from "../theme/colors";
 import { authFetch } from "../utils/api";
 import SwipeCard from "../components/SwipeCard";
 import ProfileModal from "../components/ProfileModal";
+import { PartyPopper, Heart, X } from "lucide-react";
+
+const confettiCSS = `
+@keyframes confetti-fall {
+  0% { transform: translateY(-100vh) rotate(0deg); opacity: 1; }
+  100% { transform: translateY(100vh) rotate(720deg); opacity: 0; }
+}
+.confetti-piece {
+  position: fixed;
+  width: 10px;
+  height: 10px;
+  animation: confetti-fall linear forwards;
+}
+`;
 
 export default function SwipeInterface({ matches, user, token }) {
   const navigate = useNavigate();
@@ -12,8 +26,20 @@ export default function SwipeInterface({ matches, user, token }) {
   const [messagePrompt, setMessagePrompt] = useState(null);
   const [promptMessage, setPromptMessage] = useState("");
   const [sendingMessage, setSendingMessage] = useState(false);
-  const [mutualMatchAlert, setMutualMatchAlert] = useState(null);
+  const [mutualMatch, setMutualMatch] = useState(null);
   const [profileModal, setProfileModal] = useState(null);
+
+  // Generate confetti data once (avoid Math.random() in render)
+  const confettiPieces = useMemo(() => (
+    Array.from({ length: 20 }).map((_, i) => ({
+      left: `${Math.floor(Math.random() * 100)}%`,
+      background: ['#ff6b6b', '#ffd93d', '#6bcb77', '#4d96ff', '#ff922b'][i % 5],
+      animationDuration: `${1 + Math.random() * 2}s`,
+      animationDelay: `${Math.random() * 0.5}s`,
+      borderRadius: Math.random() > 0.5 ? '50%' : '0',
+    }))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [mutualMatch]);
 
   const recordSwipe = async (match, isLike) => {
     try {
@@ -25,8 +51,7 @@ export default function SwipeInterface({ matches, user, token }) {
       if (response.ok) {
         const data = await response.json();
         if (data.is_mutual_match) {
-          setMutualMatchAlert(match.name);
-          setTimeout(() => setMutualMatchAlert(null), 3000);
+          setMutualMatch(match);
         }
       }
     } catch (err) {
@@ -95,10 +120,56 @@ export default function SwipeInterface({ matches, user, token }) {
         />
       )}
 
-      {/* Mutual match alert */}
-      {mutualMatchAlert && (
-        <div style={{ position: "fixed", top: 100, left: "50%", transform: "translateX(-50%)", zIndex: 1000, background: `linear-gradient(135deg, ${C.green}, #16A34A)`, color: "white", padding: "16px 32px", borderRadius: 16, fontSize: 16, fontWeight: 700, boxShadow: "0 8px 32px rgba(34,197,94,0.4)", animation: "fadeUp 0.5s ease-out" }}>
-          It's a mutual match with {mutualMatchAlert}!
+      {/* Mutual match celebration modal */}
+      {mutualMatch && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 9999
+        }}>
+          <style>{confettiCSS}</style>
+          {confettiPieces.map((piece, i) => (
+            <div key={i} className="confetti-piece" style={{
+              left: piece.left,
+              background: piece.background,
+              animationDuration: piece.animationDuration,
+              animationDelay: piece.animationDelay,
+              borderRadius: piece.borderRadius,
+            }} />
+          ))}
+          <div style={{
+            background: C.surface, borderRadius: 20, padding: 40, textAlign: 'center',
+            maxWidth: 360, width: '90%', position: 'relative', zIndex: 10000,
+            boxShadow: '0 20px 60px rgba(0,0,0,0.3)'
+          }}>
+            <div style={{ marginBottom: 12, display: "flex", justifyContent: "center" }}><PartyPopper size={56} /></div>
+            <h2 style={{ fontSize: 28, marginBottom: 8, fontFamily: font.display, fontWeight: 700 }}>It's a Match!</h2>
+            <p style={{ color: C.textMuted, marginBottom: 24 }}>
+              You and {mutualMatch.name?.split(" ")[0] || mutualMatch.first_name} liked each other!
+            </p>
+            {mutualMatch.profile_pic_url && (
+              <img src={mutualMatch.profile_pic_url} alt={mutualMatch.name} style={{
+                width: 80, height: 80, borderRadius: '50%', objectFit: 'cover',
+                border: '3px solid #ff6b6b', marginBottom: 16, display: 'block', margin: '0 auto 16px'
+              }} />
+            )}
+            <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
+              <button
+                onClick={() => setMutualMatch(null)}
+                style={{
+                  padding: '10px 24px', borderRadius: 8, border: `1px solid ${C.border}`,
+                  background: C.surface, cursor: 'pointer', fontSize: 15, fontFamily: font.body, color: C.text
+                }}
+              >Keep Swiping</button>
+              <button
+                onClick={() => { setMutualMatch(null); navigate("/messages"); }}
+                style={{
+                  padding: '10px 24px', borderRadius: 8, border: 'none',
+                  background: C.accent, color: 'white', cursor: 'pointer', fontSize: 15, fontFamily: font.body
+                }}
+              >Send Message</button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -106,7 +177,7 @@ export default function SwipeInterface({ matches, user, token }) {
       {messagePrompt && (
         <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.8)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
           <div className="anim-fade-up" style={{ background: C.surface, border: `2px solid ${C.border}`, borderRadius: 24, maxWidth: 440, width: "100%", padding: 32, textAlign: "center" }}>
-            <div style={{ fontSize: 48, marginBottom: 12 }}>❤️</div>
+            <div style={{ marginBottom: 12, display: "flex", justifyContent: "center" }}><Heart size={40} color="var(--accent)" /></div>
             <h3 style={{ fontFamily: font.display, fontSize: 24, fontWeight: 700, marginBottom: 8 }}>You liked {messagePrompt.name}!</h3>
             <p style={{ color: C.textMuted, fontSize: 14, marginBottom: 24 }}>Send them a message to start the conversation?</p>
 
@@ -172,29 +243,29 @@ export default function SwipeInterface({ matches, user, token }) {
             <button
               onClick={() => handleButtonSwipe("left")}
               style={{
-                width: 64, height: 64, borderRadius: "50%", border: `2px solid ${C.border}`,
-                background: C.surface, display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 32, cursor: "pointer", transition: "all 0.2s ease",
+                width: 64, height: 64, borderRadius: "50%", border: "2px solid var(--border)",
+                background: "var(--surface)", display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer", transition: "all 0.2s ease",
                 boxShadow: "0 4px 12px rgba(0,0,0,0.1)"
               }}
               onMouseEnter={(e) => { e.currentTarget.style.transform = "scale(1.1)"; e.currentTarget.style.borderColor = C.textMuted; }}
-              onMouseLeave={(e) => { e.currentTarget.style.transform = "scale(1)"; e.currentTarget.style.borderColor = C.border; }}
+              onMouseLeave={(e) => { e.currentTarget.style.transform = "scale(1)"; e.currentTarget.style.borderColor = "var(--border)"; }}
             >
-              ✕
+              <X size={28} />
             </button>
 
             <button
               onClick={() => handleButtonSwipe("right")}
               style={{
-                width: 64, height: 64, borderRadius: "50%", border: `2px solid ${C.green}`,
-                background: C.green, display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 32, cursor: "pointer", transition: "all 0.2s ease",
+                width: 64, height: 64, borderRadius: "50%", border: "2px solid #10B981",
+                background: "#10B981", display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer", transition: "all 0.2s ease",
                 boxShadow: "0 4px 12px rgba(0,0,0,0.1)"
               }}
-              onMouseEnter={(e) => { e.currentTarget.style.transform = "scale(1.1)"; e.currentTarget.style.boxShadow = "0 6px 20px rgba(34,197,94,0.4)"; }}
+              onMouseEnter={(e) => { e.currentTarget.style.transform = "scale(1.1)"; e.currentTarget.style.boxShadow = "0 6px 20px rgba(16,185,129,0.35)"; }}
               onMouseLeave={(e) => { e.currentTarget.style.transform = "scale(1)"; e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.1)"; }}
             >
-              ❤️
+              <Heart size={24} fill="white" color="white" />
             </button>
           </div>
 
@@ -204,7 +275,7 @@ export default function SwipeInterface({ matches, user, token }) {
         </>
       ) : (
         <div style={{ textAlign: "center", padding: "60px 20px", maxWidth: 600, margin: "0 auto" }}>
-          <div style={{ fontSize: 64, marginBottom: 20 }}>🎉</div>
+          <div style={{ marginBottom: 20, display: "flex", justifyContent: "center" }}><PartyPopper size={56} /></div>
           <h2 style={{ fontFamily: font.display, fontSize: 28, fontWeight: 700, marginBottom: 12 }}>You've seen all your matches!</h2>
           <p style={{ color: C.textMuted, fontSize: 16, marginBottom: 32 }}>
             Here's a summary of your swipe session
@@ -212,7 +283,7 @@ export default function SwipeInterface({ matches, user, token }) {
 
           <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 16, padding: 24, marginBottom: 24 }}>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 24 }}>
-              <div style={{ background: `${C.green}15`, border: `1px solid ${C.green}40`, borderRadius: 12, padding: 20 }}>
+              <div style={{ background: "rgba(16,185,129,0.08)", border: "1px solid rgba(16,185,129,0.25)", borderRadius: 12, padding: 20 }}>
                 <div style={{ fontSize: 36, fontWeight: 900, color: C.green, marginBottom: 4 }}>{swipedMatches.interested.length}</div>
                 <div style={{ fontSize: 14, color: C.textMuted }}>Interested</div>
               </div>

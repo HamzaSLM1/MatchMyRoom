@@ -1,11 +1,13 @@
 import { useState } from "react";
 import { C, font } from "../theme/colors";
+import { blockUser, reportUser } from "../utils/api";
+import { X, GraduationCap, User, MapPin, DollarSign, Camera, Briefcase, AtSign, ExternalLink, MessageCircle } from "lucide-react";
 
 function getInitials(name) {
   return name.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2);
 }
 
-export default function ProfileModal({ profileData, onClose, currentUser, onBlock }) {
+export default function ProfileModal({ profileData, onClose, currentUser, onBlock, onMessage }) {
   const [showReportModal, setShowReportModal] = useState(false);
   const [reportReason, setReportReason] = useState("Harassment");
   const [actionLoading, setActionLoading] = useState(false);
@@ -20,7 +22,6 @@ export default function ProfileModal({ profileData, onClose, currentUser, onBloc
     setActionLoading(true);
     setActionError("");
     try {
-      const { blockUser } = await import("../utils/api");
       const response = await blockUser(currentUser.user_id, profileData.user_id, token);
       if (response.ok) {
         setActionMessage("User blocked.");
@@ -49,7 +50,6 @@ export default function ProfileModal({ profileData, onClose, currentUser, onBloc
     setActionLoading(true);
     setActionError("");
     try {
-      const { reportUser } = await import("../utils/api");
       const response = await reportUser(currentUser.user_id, profileData.user_id, reportReason, token);
       if (response.ok) {
         setActionMessage("Report submitted. Thank you.");
@@ -70,11 +70,13 @@ export default function ProfileModal({ profileData, onClose, currentUser, onBloc
   return (
     <div onClick={onClose} style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.85)", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
       <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `2px solid ${C.border}`, borderRadius: 24, maxWidth: 500, width: "100%", maxHeight: "90vh", overflowY: "auto", position: "relative" }}>
-        <button onClick={onClose} style={{ position: "absolute", top: 16, right: 16, width: 40, height: 40, borderRadius: "50%", border: `1px solid ${C.border}`, background: C.surfaceLight, color: C.text, fontSize: 20, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 10 }}>×</button>
+        <button onClick={onClose} style={{ position: "absolute", top: 16, right: 16, width: 40, height: 40, borderRadius: "50%", border: `1px solid ${C.border}`, background: C.surfaceLight, color: C.text, fontSize: 20, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 10 }}>
+          <X size={18} />
+        </button>
 
-        <div style={{ height: 220, position: "relative", overflow: "hidden", borderRadius: "24px 24px 0 0", background: `linear-gradient(135deg, ${C.accent}20, ${C.accentSoft}10)` }}>
+        <div style={{ height: 320, position: "relative", overflow: "hidden", borderRadius: "24px 24px 0 0", background: "rgba(99,102,241,0.12)" }}>
           {profileData.profile_pic_url ? (
-            <img src={profileData.profile_pic_url} alt={profileData.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            <img src={profileData.profile_pic_url} alt={profileData.name} style={{ width: "100%", height: "100%", objectFit: "cover", objectPosition: "center 20%" }} />
           ) : (
             <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", background: `linear-gradient(135deg, ${C.accent}, ${C.accentSoft})` }}>
               <span style={{ fontFamily: font.display, fontSize: 80, fontWeight: 900, color: "white", opacity: 0.9 }}>{getInitials(profileData.name)}</span>
@@ -103,13 +105,13 @@ export default function ProfileModal({ profileData, onClose, currentUser, onBloc
             <div style={{ fontSize: 12, color: C.textDim, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 12, fontWeight: 600 }}>Key Preferences</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
               {[
-                { label: "Program", value: profileData.program, icon: "🎓" },
-                { label: "Gender", value: profileData.gender, icon: "👤" },
-                { label: "Area", value: profileData.area || profileData.location, icon: "📍" },
-                { label: "Budget", value: profileData.budget, icon: "💰" }
+                { label: "Program", value: profileData.program, icon: <GraduationCap size={14} /> },
+                { label: "Gender", value: profileData.gender, icon: <User size={14} /> },
+                { label: "Area", value: profileData.area || profileData.location, icon: <MapPin size={14} /> },
+                { label: "Budget", value: profileData.budget, icon: <DollarSign size={14} /> }
               ].filter(d => d.value).map((d, j) => (
                 <div key={j} style={{ background: C.surfaceLight, borderRadius: 12, padding: 12 }}>
-                  <div style={{ fontSize: 11, color: C.textDim, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
+                  <div style={{ fontSize: 11, color: C.textDim, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6, display: "flex", alignItems: "center", gap: 4 }}>
                     {d.icon} {d.label}
                   </div>
                   <div style={{ fontSize: 14, fontWeight: 500 }}>{d.value}</div>
@@ -123,21 +125,27 @@ export default function ProfileModal({ profileData, onClose, currentUser, onBloc
               <div style={{ fontSize: 12, color: C.textDim, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 12, fontWeight: 600 }}>Socials</div>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {[
-                  { key: "instagram", label: "Instagram", icon: "📸" },
-                  { key: "linkedin", label: "LinkedIn", icon: "💼" },
-                  { key: "twitter", label: "X / Twitter", icon: "🐦" },
+                  { key: "instagram", label: "Camera", icon: <Camera size={18} /> },
+                  { key: "linkedin", label: "LinkedIn", icon: <Briefcase size={18} /> },
+                  { key: "twitter", label: "X / AtSign", icon: <AtSign size={18} /> },
                 ].filter(s => profileData.social_links[s.key]).map(s => (
                   <a key={s.key} href={profileData.social_links[s.key]} target="_blank" rel="noopener noreferrer" style={{ display: "flex", alignItems: "center", gap: 10, background: C.surfaceLight, borderRadius: 10, padding: "10px 14px", color: C.text, textDecoration: "none", fontSize: 14, border: `1px solid ${C.border}`, transition: "border-color 0.2s" }}
                     onMouseEnter={e => e.currentTarget.style.borderColor = C.accent}
                     onMouseLeave={e => e.currentTarget.style.borderColor = C.border}
                   >
-                    <span style={{ fontSize: 18 }}>{s.icon}</span>
+                    <span style={{ display: "flex", alignItems: "center" }}>{s.icon}</span>
                     <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: C.accent }}>{profileData.social_links[s.key]}</span>
-                    <span style={{ fontSize: 12, color: C.textDim }}>↗</span>
+                    <ExternalLink size={12} color={C.textDim} />
                   </a>
                 ))}
               </div>
             </div>
+          )}
+
+          {onMessage && (
+            <button className="btn-primary" style={{ width: "100%", padding: "14px", fontSize: 15, marginBottom: 10 }} onClick={onMessage}>
+              <>Send Message <MessageCircle size={14} style={{ display: "inline", verticalAlign: "middle", marginLeft: 6 }} /></>
+            </button>
           )}
 
           <button className="btn-secondary" style={{ width: "100%", padding: "14px", fontSize: 15 }} onClick={onClose}>
@@ -148,12 +156,12 @@ export default function ProfileModal({ profileData, onClose, currentUser, onBloc
           {currentUser && currentUser.user_id !== profileData.user_id && (
             <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 16, marginTop: 8 }}>
               {actionMessage && (
-                <div style={{ padding: "10px 14px", borderRadius: 10, background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.2)", color: C.green, fontSize: 14, marginBottom: 12 }}>
+                <div style={{ padding: "10px 14px", borderRadius: 10, background: "var(--success-bg)", border: "1px solid var(--success-border)", color: "#10B981", fontSize: 14, marginBottom: 12 }}>
                   {actionMessage}
                 </div>
               )}
               {actionError && (
-                <div style={{ padding: "10px 14px", borderRadius: 10, background: "rgba(237,27,47,0.1)", border: "1px solid rgba(237,27,47,0.2)", color: "#c00", fontSize: 14, marginBottom: 12 }}>
+                <div style={{ padding: "10px 14px", borderRadius: 10, background: "var(--error-bg)", border: "1px solid var(--error-border)", color: "var(--error)", fontSize: 14, marginBottom: 12 }}>
                   {actionError}
                 </div>
               )}
@@ -199,7 +207,7 @@ export default function ProfileModal({ profileData, onClose, currentUser, onBloc
                   </select>
                 </div>
                 {actionError && (
-                  <div style={{ padding: "10px 14px", borderRadius: 10, background: "rgba(237,27,47,0.1)", border: "1px solid rgba(237,27,47,0.2)", color: "#c00", fontSize: 14, marginBottom: 16 }}>
+                  <div style={{ padding: "10px 14px", borderRadius: 10, background: "var(--error-bg)", border: "1px solid var(--error-border)", color: "var(--error)", fontSize: 14, marginBottom: 16 }}>
                     {actionError}
                   </div>
                 )}
