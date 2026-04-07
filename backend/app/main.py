@@ -72,8 +72,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Password hashing
@@ -160,10 +160,24 @@ def get_optional_user(
 @app.on_event("startup")
 def startup_event():
     """Initialize database and Cloudinary on startup"""
-    init_db()
-    init_cloudinary()
-    print("✅ Database initialized")
-    print("✅ Cloudinary configured")
+    try:
+        init_db()
+        print("✅ Database initialized")
+    except Exception as e:
+        print(f"❌ Database init failed: {e}")
+        # Tables will be created on first request via create_all fallback
+        try:
+            from .models import Base
+            from .database import engine
+            Base.metadata.create_all(bind=engine)
+            print("✅ Tables created via emergency create_all")
+        except Exception as e2:
+            print(f"❌ Emergency create_all also failed: {e2}")
+    try:
+        init_cloudinary()
+        print("✅ Cloudinary configured")
+    except Exception as e:
+        print(f"⚠️  Cloudinary init failed: {e}")
     print(f"✅ CORS origins: {ALLOWED_ORIGINS}")
 
 
@@ -1366,15 +1380,27 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int, token: str = Qu
 
 
 # ─── Health Check ───
+@app.get("/api/ping")
+def ping():
+    """Simple health check - no DB"""
+    return {"status": "ok"}
+
+
 @app.get("/api/health")
 def health_check(db: Session = Depends(get_db)):
-    """Health check endpoint"""
-    user_count = db.query(User).count()
-    return {
-        "status": "ok",
-        "users": user_count,
-        "database": "connected"
-    }
+    """Health check endpoint with DB"""
+    try:
+        user_count = db.query(User).count()
+        return {
+            "status": "ok",
+            "users": user_count,
+            "database": "connected"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "database": str(e)
+        }
 
 
 # ─── Development: Create Fake Users ───
