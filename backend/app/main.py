@@ -173,6 +173,18 @@ def startup_event():
             print("✅ Tables created via emergency create_all")
         except Exception as e2:
             print(f"❌ Emergency create_all also failed: {e2}")
+    # Ensure any missing columns are added (safe to run on every startup)
+    try:
+        from sqlalchemy import text
+        from .database import engine
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS share_token VARCHAR"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP"))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_share_token ON users (share_token)"))
+            conn.commit()
+        print("✅ Column migration check complete")
+    except Exception as e:
+        print(f"⚠️  Column migration check failed: {e}")
     try:
         init_cloudinary()
         print("✅ Cloudinary configured")
