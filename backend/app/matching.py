@@ -183,6 +183,217 @@ def calculate_compatibility(user1_responses: Dict[str, int], user2_responses: Di
     return round(max(0, min(100, score)), 1)
 
 
+def calculate_compatibility_breakdown(user1_responses: Dict, user2_responses: Dict) -> dict:
+    """
+    Returns per-category compatibility breakdown instead of a single score.
+    Each category includes score, max_score, percentage, status, and readable values.
+    """
+
+    def get_status(score: float, max_score: float) -> str:
+        if max_score == 0:
+            return "match"
+        pct = score / max_score * 100
+        if pct >= 80:
+            return "match"
+        elif pct >= 40:
+            return "close"
+        return "mismatch"
+
+    user1_has_apt = user1_responses.get("hasApartment") == 0
+    user2_has_apt = user2_responses.get("hasApartment") == 0
+
+    # Both have apartments — incompatible
+    if user1_has_apt and user2_has_apt:
+        return {
+            "overall_score": 0.0,
+            "categories": [
+                {"name": "Budget", "icon": "💰", "score": 0, "max_score": 30, "percentage": 0, "status": "mismatch", "your_value": "Has apartment", "their_value": "Has apartment"},
+                {"name": "Location", "icon": "📍", "score": 0, "max_score": 25, "percentage": 0, "status": "mismatch", "your_value": "N/A", "their_value": "N/A"},
+                {"name": "Gender Preference", "icon": "👤", "score": 0, "max_score": 20, "percentage": 0, "status": "mismatch", "your_value": "N/A", "their_value": "N/A"},
+                {"name": "Lifestyle", "icon": "🌙", "score": 0, "max_score": 20, "percentage": 0, "status": "mismatch", "subcategories": []},
+                {"name": "Pets", "icon": "🐾", "score": 0, "max_score": 5, "percentage": 0, "status": "mismatch", "your_value": "N/A", "their_value": "N/A"},
+            ]
+        }
+
+    categories = []
+
+    # ─── Budget & Location ───
+    if user1_has_apt or user2_has_apt:
+        # Mixed: one has apartment, one is looking
+        apt_r = user1_responses if user1_has_apt else user2_responses
+        look_r = user2_responses if user1_has_apt else user1_responses
+
+        apt_rent = apt_r.get("apartmentRent")
+        seek_budget = look_r.get("budget")
+        budget_score = 0.0
+        if apt_rent is not None and seek_budget is not None:
+            if isinstance(apt_rent, int) and isinstance(seek_budget, int):
+                diff = abs(apt_rent - seek_budget)
+                if diff == 0:
+                    budget_score = 30
+                elif diff == 1:
+                    budget_score = 20
+                elif diff == 2:
+                    budget_score = 10
+            else:
+                budget_score = 15
+        else:
+            budget_score = 15
+
+        if user1_has_apt:
+            your_budget = get_question_text("apartmentRent", apt_rent) if apt_rent is not None else "Not specified"
+            their_budget = get_question_text("budget", seek_budget) if seek_budget is not None else "Not specified"
+        else:
+            your_budget = get_question_text("budget", seek_budget) if seek_budget is not None else "Not specified"
+            their_budget = get_question_text("apartmentRent", apt_rent) if apt_rent is not None else "Not specified"
+
+        apt_loc = apt_r.get("apartmentLocation")
+        seek_loc = look_r.get("location")
+        location_score = 0.0
+        if apt_loc is not None and seek_loc is not None:
+            if seek_loc == 5:
+                location_score = 15
+            elif isinstance(apt_loc, int) and isinstance(seek_loc, int) and apt_loc == seek_loc:
+                location_score = 25
+        else:
+            location_score = 12
+
+        if user1_has_apt:
+            your_loc = get_question_text("apartmentLocation", apt_loc) if apt_loc is not None else "Not specified"
+            their_loc = get_question_text("location", seek_loc) if seek_loc is not None else "Not specified"
+        else:
+            your_loc = get_question_text("location", seek_loc) if seek_loc is not None else "Not specified"
+            their_loc = get_question_text("apartmentLocation", apt_loc) if apt_loc is not None else "Not specified"
+    else:
+        # Both looking
+        user1_housing = user1_responses.get("livingLocation", user1_responses.get("housingType"))
+        user2_housing = user2_responses.get("livingLocation", user2_responses.get("housingType"))
+        both_in_residence = user1_housing == 0 and user2_housing == 0
+
+        if both_in_residence:
+            budget_score = 30.0
+            your_budget = "University residence"
+            their_budget = "University residence"
+            location_score = 25.0
+            your_loc = "University residence"
+            their_loc = "University residence"
+        else:
+            u1_b = user1_responses.get("budget")
+            u2_b = user2_responses.get("budget")
+            budget_score = 0.0
+            if u1_b is not None and u2_b is not None:
+                if isinstance(u1_b, int) and isinstance(u2_b, int):
+                    if u1_b == u2_b:
+                        budget_score = 30
+                    elif abs(u1_b - u2_b) == 1:
+                        budget_score = 20
+                    elif abs(u1_b - u2_b) == 2:
+                        budget_score = 10
+                else:
+                    budget_score = 15
+            elif u1_b is None and u2_b is None:
+                budget_score = 30
+            your_budget = get_question_text("budget", u1_b) if u1_b is not None else "Not specified"
+            their_budget = get_question_text("budget", u2_b) if u2_b is not None else "Not specified"
+
+            u1_l = user1_responses.get("location")
+            u2_l = user2_responses.get("location")
+            location_score = 0.0
+            if u1_l is not None and u2_l is not None:
+                if u1_l == 5 or u2_l == 5:
+                    location_score = 15
+                elif u1_l == u2_l:
+                    location_score = 25
+            elif u1_l is None and u2_l is None:
+                location_score = 25
+            your_loc = get_question_text("location", u1_l) if u1_l is not None else "Not specified"
+            their_loc = get_question_text("location", u2_l) if u2_l is not None else "Not specified"
+
+    categories.append({
+        "name": "Budget",
+        "icon": "💰",
+        "score": budget_score,
+        "max_score": 30,
+        "percentage": round(budget_score / 30 * 100),
+        "status": get_status(budget_score, 30),
+        "your_value": your_budget,
+        "their_value": their_budget,
+    })
+    categories.append({
+        "name": "Location",
+        "icon": "📍",
+        "score": location_score,
+        "max_score": 25,
+        "percentage": round(location_score / 25 * 100),
+        "status": get_status(location_score, 25),
+        "your_value": your_loc,
+        "their_value": their_loc,
+    })
+
+    # ─── Gender Preference ───
+    gender_score = _gender_score(user1_responses, user2_responses)
+    u1_gp = user1_responses.get("genderPreference", 2)
+    u2_gp = user2_responses.get("genderPreference", 2)
+    categories.append({
+        "name": "Gender Preference",
+        "icon": "👤",
+        "score": gender_score,
+        "max_score": 20,
+        "percentage": round(gender_score / 20 * 100),
+        "status": get_status(gender_score, 20),
+        "your_value": get_question_text("genderPreference", u1_gp),
+        "their_value": get_question_text("genderPreference", u2_gp),
+    })
+
+    # ─── Lifestyle ───
+    lifestyle_keys = ["sleepSchedule", "cleanliness", "noise", "guests", "study"]
+    lifestyle_icons = {"sleepSchedule": "😴", "cleanliness": "✨", "noise": "🔊", "guests": "🚪", "study": "📚"}
+    lifestyle_names = {"sleepSchedule": "Sleep", "cleanliness": "Cleanliness", "noise": "Noise", "guests": "Guests", "study": "Study"}
+    match_count = 0
+    subcategories = []
+    for k in lifestyle_keys:
+        v1 = user1_responses.get(k)
+        v2 = user2_responses.get(k)
+        is_match = v1 is not None and v1 == v2
+        if is_match:
+            match_count += 1
+        subcategories.append({
+            "name": lifestyle_names[k],
+            "icon": lifestyle_icons[k],
+            "match": is_match,
+            "your_value": get_question_text(k, v1) if v1 is not None else "Not specified",
+            "their_value": get_question_text(k, v2) if v2 is not None else "Not specified",
+        })
+    lifestyle_score = (match_count / len(lifestyle_keys)) * 20
+    categories.append({
+        "name": "Lifestyle",
+        "icon": "🌙",
+        "score": lifestyle_score,
+        "max_score": 20,
+        "percentage": round(lifestyle_score / 20 * 100),
+        "status": get_status(lifestyle_score, 20),
+        "subcategories": subcategories,
+    })
+
+    # ─── Pets ───
+    pet_score = _pet_score(user1_responses, user2_responses)
+    u1_pets = user1_responses.get("pets")
+    u2_pets = user2_responses.get("pets")
+    categories.append({
+        "name": "Pets",
+        "icon": "🐾",
+        "score": pet_score,
+        "max_score": 5,
+        "percentage": round(pet_score / 5 * 100),
+        "status": get_status(pet_score, 5),
+        "your_value": get_question_text("pets", u1_pets) if u1_pets is not None else "Not specified",
+        "their_value": get_question_text("pets", u2_pets) if u2_pets is not None else "Not specified",
+    })
+
+    overall_score = round(max(0, min(100, budget_score + location_score + gender_score + lifestyle_score + pet_score)), 1)
+    return {"overall_score": overall_score, "categories": categories}
+
+
 def get_question_text(question_id: str, option_index: int) -> str:
     """
     Helper function to convert question ID and option index to readable text.

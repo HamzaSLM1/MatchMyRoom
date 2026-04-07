@@ -38,6 +38,7 @@ async def upload_profile_picture(file_content: bytes, user_id: int) -> Optional[
             folder="matchmyroom/profiles",
             public_id=f"user_{user_id}",
             overwrite=True,
+            moderation="aws_rek",
             transformation=[
                 {"width": 800, "height": 800, "crop": "fill", "gravity": "face"},
                 {"quality": "auto:best"},
@@ -45,11 +46,16 @@ async def upload_profile_picture(file_content: bytes, user_id: int) -> Optional[
             ]
         )
 
-        return result.get("secure_url")
+        # Reject if AWS Rekognition flagged the image as inappropriate
+        if result.get("moderation") and result["moderation"][0].get("status") == "rejected":
+            cloudinary.uploader.destroy(f"matchmyroom/profiles/user_{user_id}")
+            return None, "rejected"
+
+        return result.get("secure_url"), None
 
     except Exception as e:
         print(f"Error uploading to Cloudinary: {e}")
-        return None
+        return None, None
 
 
 def delete_profile_picture(user_id: int) -> bool:
