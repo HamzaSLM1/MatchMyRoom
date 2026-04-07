@@ -86,7 +86,7 @@ export default function ResetPasswordPage() {
 
         {success ? (
           <div>
-            <div style={{ padding: "16px", borderRadius: 12, background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.2)", color: C.green, fontSize: 15, textAlign: "center", marginBottom: 16 }}>
+            <div style={{ padding: "16px", borderRadius: 12, background: "var(--success-bg)", border: "1px solid var(--success-border)", color: "#10B981", fontSize: 15, textAlign: "center", marginBottom: 16 }}>
               Password reset successfully! Redirecting to login...
             </div>
           </div>
@@ -115,13 +115,13 @@ export default function ResetPasswordPage() {
             </div>
 
             {validationError && (
-              <div style={{ padding: "12px 16px", borderRadius: 10, background: "rgba(237,27,47,0.1)", border: "1px solid rgba(237,27,47,0.2)", color: C.mcgillRed, fontSize: 14 }}>
+              <div style={{ padding: "12px 16px", borderRadius: 10, background: "var(--error-bg)", border: "1px solid var(--error-border)", color: "var(--error)", fontSize: 14 }}>
                 {validationError}
               </div>
             )}
 
             {error && (
-              <div style={{ padding: "12px 16px", borderRadius: 10, background: "rgba(237,27,47,0.1)", border: "1px solid rgba(237,27,47,0.2)", color: C.mcgillRed, fontSize: 14 }}>
+              <div style={{ padding: "12px 16px", borderRadius: 10, background: "var(--error-bg)", border: "1px solid var(--error-border)", color: "var(--error)", fontSize: 14 }}>
                 {error}{" "}
                 {error.includes("expired") && (
                   <span style={{ color: C.accent, cursor: "pointer", textDecoration: "underline" }} onClick={() => navigate("/forgot-password")}>

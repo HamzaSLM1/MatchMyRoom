@@ -13,3 +13,4 @@ slowapi==0.1.9
 resend==2.21.0
 psycopg2-binary==2.9.9
 alembic==1.13.1
+anthropic>=0.40.0

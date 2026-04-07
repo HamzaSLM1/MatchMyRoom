@@ -44,7 +44,7 @@ export default function ForgotPasswordPage() {
 
         {submitted ? (
           <div>
-            <div style={{ padding: "16px", borderRadius: 12, background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.2)", color: C.green, fontSize: 15, textAlign: "center", marginBottom: 24 }}>
+            <div style={{ padding: "16px", borderRadius: 12, background: "var(--success-bg)", border: "1px solid var(--success-border)", color: "#10B981", fontSize: 15, textAlign: "center", marginBottom: 24 }}>
               If that email is registered, you'll receive a reset link.
             </div>
             <button
@@ -70,7 +70,7 @@ export default function ForgotPasswordPage() {
             </div>
 
             {error && (
-              <div style={{ padding: "12px 16px", borderRadius: 10, background: "rgba(237,27,47,0.1)", border: "1px solid rgba(237,27,47,0.2)", color: C.mcgillRed, fontSize: 14 }}>
+              <div style={{ padding: "12px 16px", borderRadius: 10, background: "var(--error-bg)", border: "1px solid var(--error-border)", color: "var(--error)", fontSize: 14 }}>
                 {error}
               </div>
             )}

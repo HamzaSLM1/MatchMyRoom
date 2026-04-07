@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { C, font } from "../theme/colors";
-import { applyTheme } from "../theme/colors";
 import Logo from "../components/Logo";
 
 export default function AuthPage({ mode, onAuth, setPendingEmail, setDevCode }) {
@@ -46,7 +45,6 @@ export default function AuthPage({ mode, onAuth, setPendingEmail, setDevCode }) 
         setLoading(false);
         navigate("/verify");
       } else {
-        applyTheme(data.university);
         setLoading(false);
         onAuth(data);
       }
@@ -69,7 +67,7 @@ export default function AuthPage({ mode, onAuth, setPendingEmail, setDevCode }) 
             <div style={{ textAlign: "right", marginTop: -8 }}>
               <span
                 style={{ fontSize: 13, color: C.textMuted, cursor: "pointer" }}
-                onMouseEnter={e => e.target.style.color = C.accent}
+                onMouseEnter={e => e.target.style.color = "var(--accent)"}
                 onMouseLeave={e => e.target.style.color = C.textMuted}
                 onClick={() => navigate("/forgot-password")}
               >
@@ -77,7 +75,7 @@ export default function AuthPage({ mode, onAuth, setPendingEmail, setDevCode }) 
               </span>
             </div>
           )}
-          {error && <div style={{ padding: "12px 16px", borderRadius: 10, background: "rgba(237,27,47,0.1)", border: "1px solid rgba(237,27,47,0.2)", color: C.mcgillRed, fontSize: 14 }}>{error}</div>}
+          {error && <div style={{ padding: "12px 16px", borderRadius: 10, background: "var(--error-bg)", border: "1px solid var(--error-border)", color: "var(--error)", fontSize: 14 }}>{error}</div>}
           <button className="btn-primary" style={{ width: "100%", padding: "15px", marginTop: 8, opacity: loading ? 0.7 : 1 }} onClick={handleSubmit} disabled={loading}>{loading ? "Please wait..." : isSignup ? "Create account" : "Log in"}</button>
         </div>
         <div style={{ textAlign: "center", marginTop: 24, fontSize: 14, color: C.textMuted }}>

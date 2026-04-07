@@ -28,7 +28,7 @@ from .schemas import (
     SwipeRequest, SwipeResponse, SwipeHistoryItem, SendInitialMessageRequest,
     ForgotPasswordRequest, ResetPasswordRequest, BlockRequest, ReportRequest
 )
-from .matching import calculate_compatibility, get_question_text
+from .matching import calculate_compatibility, calculate_compatibility_breakdown, get_question_text
 from .cloudinary_config import init_cloudinary, upload_profile_picture, delete_profile_picture
 from .email_service import send_new_matches_notification, send_welcome_email, send_verification_code, send_like_notification, send_mutual_match_notification, send_email
 from .utils import get_blocked_user_ids
@@ -884,6 +884,29 @@ Write the explanation directly (no preamble like "Here is..." or "Based on...").
         return {"explanation": explanation, "compatibility_score": match.compatibility_score}
     except anthropic.APIError as e:
         raise HTTPException(status_code=503, detail="AI service temporarily unavailable")
+
+
+
+# ─── Compatibility Breakdown ───
+@app.get("/api/matches/breakdown/{user_id}/{other_user_id}")
+@limiter.limit("30/minute")
+def get_match_breakdown(
+    request: Request,
+    user_id: int,
+    other_user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Return per-category compatibility breakdown between two users."""
+    if current_user.id != user_id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    user_q = db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == user_id).first()
+    other_q = db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == other_user_id).first()
+    if not user_q or not other_q:
+        raise HTTPException(status_code=400, detail="Both users must have completed questionnaires")
+
+    return calculate_compatibility_breakdown(user_q.responses, other_q.responses)
 
 
 # ─── Swipe/Like Endpoints (Authenticated) ───

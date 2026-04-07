@@ -190,7 +190,7 @@ const mockMatches = [
 // ─── Components ───
 
 function Logo({ size = 28 }) {
-  return (
+  return (1
     <div style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
       <div style={{
         width: size + 6, height: size + 6, borderRadius: 10,

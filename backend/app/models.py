@@ -29,6 +29,13 @@ class User(Base):
 
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
+    # Share token for public profile links (Feature 12)
+    share_token = Column(String, unique=True, nullable=True, index=True)
+
+    # Last seen timestamp for online presence tracking (Feature 3)
+    # None means the user is currently online; a datetime means they were last seen at that time
+    last_seen = Column(DateTime, nullable=True)
+
     # Relationships
     questionnaire = relationship("QuestionnaireResponse", back_populates="user", uselist=False)
     matches_as_user1 = relationship("Match", foreign_keys="Match.user1_id", back_populates="user1")
@@ -77,9 +84,10 @@ class Like(Base):
     is_like = Column(Boolean, nullable=False)  # True for right swipe (like), False for left swipe (pass)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
-    # Composite index for efficient like lookups
+    # Composite index for efficient like lookups and mutual-like reverse lookups
     __table_args__ = (
         Index("ix_like_users", "user_id", "liked_user_id"),
+        Index("ix_like_reverse", "liked_user_id", "user_id"),
     )
 
     # Relationships
@@ -97,9 +105,10 @@ class Message(Base):
     sent_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
     read = Column(Boolean, default=False)
 
-    # Composite index for efficient thread lookups
+    # Two directional indexes to support OR-based thread queries efficiently
     __table_args__ = (
-        Index("ix_message_thread", "sender_id", "recipient_id", "sent_at"),
+        Index("ix_message_sender", "sender_id", "sent_at"),
+        Index("ix_message_recipient", "recipient_id", "sent_at"),
     )
 
     # Relationships
@@ -131,6 +140,7 @@ class Block(Base):
 
     __table_args__ = (
         PrimaryKeyConstraint("blocker_id", "blocked_id"),
+        Index("ix_block_blocked_id", "blocked_id"),
     )
 
     # Relationships
