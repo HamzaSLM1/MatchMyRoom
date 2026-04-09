@@ -424,6 +424,24 @@ def resend_verification_code(request: Request, data: ResendCodeRequest, db: Sess
     }
 
 
+# ─── Dev: Test Email ───
+@app.get("/api/dev/test-email")
+def test_email(to: str):
+    """Test email sending — dev only"""
+    if os.getenv("ENV", "development") == "production":
+        raise HTTPException(status_code=403, detail="Disabled in production")
+    from .email_service import send_email, RESEND_API_KEY, SMTP_USERNAME, SMTP_PASSWORD, FROM_EMAIL, SMTP_HOST, SMTP_PORT
+    config = {
+        "RESEND_API_KEY": "set" if RESEND_API_KEY else "NOT SET",
+        "SMTP_USERNAME": SMTP_USERNAME or "NOT SET",
+        "SMTP_HOST": SMTP_HOST,
+        "SMTP_PORT": SMTP_PORT,
+        "FROM_EMAIL": FROM_EMAIL,
+    }
+    result = send_email(to, "MatchMyRoom Test Email", "<p>Test email from MatchMyRoom. If you see this, email is working!</p>")
+    return {"sent": result, "config": config}
+
+
 # ─── Profile Endpoints (Authenticated) ───
 
 # Feature 12: Public profile endpoint — no auth required.
