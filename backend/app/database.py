@@ -46,6 +46,16 @@ def init_db():
         Base.metadata.create_all(bind=engine)
         print("✅ Tables created via create_all fallback")
 
+    # Force clear all users
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("TRUNCATE users CASCADE;"))
+            conn.commit()
+        print("✅ Users table truncated")
+    except Exception as e:
+        print(f"⚠️  Failed to truncate users: {e}")
+
 
 def get_db():
     """Dependency for FastAPI endpoints to get a database session."""
