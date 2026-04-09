@@ -22,32 +22,17 @@ APP_URL = os.getenv("APP_URL", "http://localhost:3000")
 
 
 def send_email(to_email: str, subject: str, html_content: str) -> bool:
-    """Send an email using Resend (with verified domain) or SMTP"""
+    """Send an email — SMTP preferred (Gmail), Resend as fallback if no SMTP configured"""
 
-    using_test_from = FROM_EMAIL == "onboarding@resend.dev"
-
-    # If FROM_EMAIL is Resend's test address, it only delivers to the account owner.
-    # Prefer SMTP for real recipients, fall back to Resend only if SMTP isn't set.
-    if using_test_from:
-        if SMTP_USERNAME and SMTP_PASSWORD:
-            print(f"ℹ️  FROM_EMAIL is test address — using SMTP for {to_email}")
-            return _send_via_smtp(to_email, subject, html_content)
-        elif RESEND_API_KEY:
-            print(f"⚠️  FROM_EMAIL=onboarding@resend.dev only delivers to the Resend account owner. "
-                  f"Set FROM_EMAIL to a verified domain address, or configure SMTP_USERNAME/SMTP_PASSWORD.")
-            return _send_via_resend(to_email, subject, html_content)
-        else:
-            print("⚠️  Email not configured. Set RESEND_API_KEY (with verified FROM_EMAIL) or SMTP credentials.")
-            return False
-
-    # Verified Resend domain — use Resend first, SMTP as fallback
-    if RESEND_API_KEY:
-        return _send_via_resend(to_email, subject, html_content)
-
+    # SMTP takes priority: it's what was working (matchmyroom.mcgill@gmail.com).
+    # Resend only used when SMTP credentials are absent.
     if SMTP_USERNAME and SMTP_PASSWORD:
         return _send_via_smtp(to_email, subject, html_content)
 
-    print("⚠️  Email not configured. Set RESEND_API_KEY or SMTP credentials in .env")
+    if RESEND_API_KEY and FROM_EMAIL != "onboarding@resend.dev":
+        return _send_via_resend(to_email, subject, html_content)
+
+    print("⚠️  Email not configured. Set SMTP_USERNAME + SMTP_PASSWORD in Railway env vars.")
     return False
 
 
