@@ -430,6 +430,15 @@ function AuthPage({ mode, setPage, setPendingEmail, setDevCode, onAuth }) {
         return;
       }
 
+      // Signup requires email verification — token is empty until verified
+      if (isSignup && !data.token) {
+        setPendingEmail(email);
+        if (data.dev_code) setDevCode(data.dev_code);
+        setLoading(false);
+        setPage("verify");
+        return;
+      }
+
       applyTheme(data.university);
       setLoading(false);
       onAuth(data);
