@@ -475,11 +475,13 @@ function AuthPage({ mode, setPage, setPendingEmail, setDevCode, onAuth }) {
   );
 }
 
-function VerificationPage({ email, setPage, devCode }) {
+function VerificationPage({ email, setPage, devCode: initialDevCode, setDevCode }) {
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [localDevCode, setLocalDevCode] = useState(initialDevCode || "");
+  const shownDevCode = localDevCode || initialDevCode;
 
   const handleVerify = async () => {
     setError("");
@@ -521,7 +523,10 @@ function VerificationPage({ email, setPage, devCode }) {
       
       if (response.ok) {
         setError("");
-        alert("New code sent! Check your inbox.");
+        if (data.dev_code) {
+          setLocalDevCode(data.dev_code);
+          if (setDevCode) setDevCode(data.dev_code);
+        }
       } else {
         setError(data.detail || "Failed to resend code");
       }
@@ -545,10 +550,10 @@ function VerificationPage({ email, setPage, devCode }) {
           <p style={{ color: C.textMuted, fontSize: 13, marginTop: 12, padding: "10px 16px", background: C.surfaceLight, borderRadius: 8 }}>
             <strong style={{ color: C.text }}>📬 Check your junk/spam folder</strong> if you don't see it in your inbox
           </p>
-          {devCode && (
+          {shownDevCode && (
             <div style={{ marginTop: 12, padding: "12px 16px", background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 8 }}>
               <div style={{ fontSize: 12, color: C.textDim, marginBottom: 4 }}>🛠️ Dev mode — your code:</div>
-              <div style={{ fontSize: 24, fontWeight: 700, color: C.green, letterSpacing: "6px", fontFamily: "monospace" }}>{devCode}</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: C.green, letterSpacing: "6px", fontFamily: "monospace" }}>{shownDevCode}</div>
             </div>
           )}
         </div>
@@ -1749,7 +1754,7 @@ export default function App() {
       {page === "tos" && <TermsOfServicePage setPage={setPage} />}
       {page === "signup" && <AuthPage mode="signup" setPage={setPage} setPendingEmail={setPendingEmail} setDevCode={setDevCode} onAuth={handleAuth} />}
       {page === "login" && <AuthPage mode="login" setPage={setPage} setPendingEmail={setPendingEmail} setDevCode={setDevCode} onAuth={handleAuth} />}
-      {page === "verify" && <VerificationPage email={pendingEmail} setPage={setPage} devCode={devCode} />}
+      {page === "verify" && <VerificationPage email={pendingEmail} setPage={setPage} devCode={devCode} setDevCode={setDevCode} />}
       {page === "questionnaire" && <QuestionnairePage setPage={setPage} onComplete={handleQuestionnaireComplete} user={user} token={token} />}
       {page === "dashboard" && <DashboardPage user={user} setPage={setPage} setSelectedMatch={setSelectedMatch} token={token} />}
       {page === "profile" && <ProfileEditPage user={user} setPage={setPage} onProfileUpdate={handleProfileUpdate} token={token} />}
