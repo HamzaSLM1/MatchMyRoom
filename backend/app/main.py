@@ -417,7 +417,11 @@ def resend_verification_code(request: Request, data: ResendCodeRequest, db: Sess
         daemon=True
     ).start()
 
-    return {"message": "Verification code sent! Check your inbox."}
+    is_dev = os.getenv("ENV", "development") != "production"
+    return {
+        "message": "Verification code sent! Check your inbox.",
+        "dev_code": verification_code if is_dev else None
+    }
 
 
 # ─── Profile Endpoints (Authenticated) ───
