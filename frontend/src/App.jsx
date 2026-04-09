@@ -430,16 +430,9 @@ function AuthPage({ mode, setPage, setPendingEmail, setDevCode, onAuth }) {
         return;
       }
 
-      if (isSignup) {
-        setPendingEmail(email);
-        if (data.dev_code) setDevCode(data.dev_code);
-        setLoading(false);
-        setPage("verify");
-      } else {
-        applyTheme(data.university);
-        setLoading(false);
-        onAuth(data);
-      }
+      applyTheme(data.university);
+      setLoading(false);
+      onAuth(data);
     } catch (err) { setError("Network error. Please try again."); setLoading(false); }
   };
 
