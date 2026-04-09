@@ -1833,3 +1833,27 @@ def report_user(
     db.commit()
 
     return {"message": "Report submitted"}
+
+
+# ─── Admin Endpoints (Dev only) ───
+
+@app.delete("/api/admin/clear-all-users")
+def clear_all_users(db: Session = Depends(get_db)):
+    """
+    Delete every user from the database.
+    Cascading deletes handle all related rows (questionnaire responses, matches,
+    messages, likes, password reset tokens, blocks, and reports).
+
+    Only available outside of production (ENV != "production").
+    """
+    if os.getenv("ENV", "development") == "production":
+        raise HTTPException(status_code=403, detail="This endpoint is disabled in production")
+
+    deleted_count = db.query(User).count()
+    db.query(User).delete()
+    db.commit()
+
+    return {
+        "message": "All users deleted successfully",
+        "deleted_count": deleted_count
+    }
