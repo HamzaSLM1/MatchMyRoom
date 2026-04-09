@@ -253,45 +253,29 @@ def _signup_impl(request: Request, data: SignupRequest, db: Session):
     # Determine university
     university = get_university_from_email(email)
 
-    # Generate verification code
-    verification_code = generate_verification_code()
-    code_expires = datetime.now(timezone.utc) + timedelta(minutes=15)
-
-    # Create user (email_verified = False by default)
+    # Create user — email verified immediately, no code needed
     new_user = User(
         name=data.name.strip(),
         email=email,
         password_hash=hashed_password,
         university=university,
-        email_verified=False,
-        verification_code=verification_code,
-        verification_code_expires=code_expires,
-        verification_attempts=0
+        email_verified=True,
     )
 
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
 
-    # Send verification email in background thread so it doesn't block the response
-    parts = data.name.split() if data.name else []
-    first_name = parts[0] if parts else "there"
-    threading.Thread(
-        target=lambda: send_verification_code(email, first_name, verification_code),
-        daemon=True
-    ).start()
-
-    # In dev mode, include the code in the response so email delivery doesn't block testing
-    is_dev = os.getenv("ENV", "development") != "production"
+    token = create_token(new_user.id, new_user.email)
 
     return AuthResponse(
-        message="Verification code sent to your email. Please check your inbox.",
+        message="Account created successfully!",
         user_id=new_user.id,
         email=new_user.email,
         name=new_user.name,
         university=new_user.university,
         questionnaire_completed=False,
-        dev_code=verification_code if is_dev else None
+        token=token
     )
 
 
@@ -309,13 +293,6 @@ def login(request: Request, data: LoginRequest, db: Session = Depends(get_db)):
     # Verify password
     if not pwd_context.verify(data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-
-    # Check if email is verified
-    if not user.email_verified:
-        raise HTTPException(
-            status_code=403,
-            detail="Please verify your email first. Check your inbox for the verification code."
-        )
 
     # Generate JWT token
     token = create_token(user.id, user.email)
