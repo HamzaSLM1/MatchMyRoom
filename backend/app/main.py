@@ -2,49 +2,46 @@ from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Request, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session, joinedload
-from passlib.context import CryptContext
 from typing import List, Optional
 import os
+import base64
 import secrets
-import string
+import uuid as _uuid
 import jwt
 from dotenv import load_dotenv
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import threading
 import anthropic
 
 from .database import get_db, init_db
-from .models import User, QuestionnaireResponse, Match, Message, Like, PasswordResetToken, Block, Report
+from .models import User, QuestionnaireResponse, Match, Message, Like, Block, Report
 from .schemas import (
-    SignupRequest, LoginRequest, AuthResponse,
     ProfileUpdateRequest, UserProfile,
     QuestionnaireSubmit,
     MatchResponse,
     MessageSendRequest, MessageResponse, ConversationPreview,
-    VerifyEmailRequest, VerifyEmailResponse, ResendCodeRequest,
     SwipeRequest, SwipeResponse, SwipeHistoryItem, SendInitialMessageRequest,
-    ForgotPasswordRequest, ResetPasswordRequest, BlockRequest, ReportRequest
+    BlockRequest, ReportRequest
 )
 from .matching import calculate_compatibility, calculate_compatibility_breakdown, get_question_text
 from .cloudinary_config import init_cloudinary, upload_profile_picture, delete_profile_picture
-from .email_service import send_new_matches_notification, send_welcome_email, send_verification_code, send_like_notification, send_mutual_match_notification, send_email
+from .email_service import send_new_matches_notification, send_like_notification, send_mutual_match_notification, send_email
 from .utils import get_blocked_user_ids
 
 # Load environment variables
 load_dotenv()
 
 # ─── Configuration ───
-JWT_SECRET = os.getenv("JWT_SECRET")
-if not JWT_SECRET:
+_SUPABASE_JWT_SECRET_B64 = os.getenv("SUPABASE_JWT_SECRET")
+if not _SUPABASE_JWT_SECRET_B64:
     raise RuntimeError(
-        "JWT_SECRET environment variable is required. "
-        "Set it in your .env file. Use: python -c \"import secrets; print(secrets.token_hex(32))\""
+        "SUPABASE_JWT_SECRET environment variable is required. "
+        "Set it in your .env file with the base64-encoded JWT secret from the Supabase dashboard."
     )
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_HOURS = 72
+_JWT_SECRET = base64.b64decode(_SUPABASE_JWT_SECRET_B64)
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 MAX_VERIFICATION_ATTEMPTS = 5
 ALLOWED_ORIGINS = os.getenv(
@@ -76,9 +73,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 # Bearer token scheme
 security = HTTPBearer(auto_error=False)
 
@@ -86,16 +80,16 @@ security = HTTPBearer(auto_error=False)
 # ─── WebSocket Connection Manager ───
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: dict[int, WebSocket] = {}
+        self.active_connections: dict[str, WebSocket] = {}
 
-    async def connect(self, user_id: int, websocket: WebSocket):
+    async def connect(self, user_id: str, websocket: WebSocket):
         await websocket.accept()
         self.active_connections[user_id] = websocket
 
-    def disconnect(self, user_id: int):
+    def disconnect(self, user_id: str):
         self.active_connections.pop(user_id, None)
 
-    async def send_to_user(self, user_id: int, message: dict) -> bool:
+    async def send_to_user(self, user_id: str, message: dict) -> bool:
         ws = self.active_connections.get(user_id)
         if ws:
             await ws.send_json(message)
@@ -107,36 +101,30 @@ ws_manager = ConnectionManager()
 
 
 # ─── JWT Helpers ───
-def create_token(user_id: int, email: str) -> str:
-    """Create a JWT token for authenticated user"""
-    payload = {
-        "user_id": user_id,
-        "email": email,
-        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS),
-        "iat": datetime.now(timezone.utc)
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-
-
 def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: Session = Depends(get_db)
 ) -> User:
-    """Verify JWT token and return current user"""
+    """Verify Supabase JWT and return current user from public.users"""
     if not credentials:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     try:
-        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        user_id = payload.get("user_id")
-        if user_id is None:
+        payload = jwt.decode(
+            credentials.credentials,
+            _JWT_SECRET,
+            algorithms=["HS256"],
+            options={"verify_aud": False},
+        )
+        user_id_str = payload.get("sub")
+        if user_id_str is None:
             raise HTTPException(status_code=401, detail="Invalid token")
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    user = db.query(User).filter(User.id == user_id).first()
+    user = db.query(User).filter(User.id == _uuid.UUID(user_id_str)).first()
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
 
@@ -160,31 +148,6 @@ def get_optional_user(
 @app.on_event("startup")
 def startup_event():
     """Initialize database and Cloudinary on startup"""
-    try:
-        init_db()
-        print("✅ Database initialized")
-    except Exception as e:
-        print(f"❌ Database init failed: {e}")
-        # Tables will be created on first request via create_all fallback
-        try:
-            from .models import Base
-            from .database import engine
-            Base.metadata.create_all(bind=engine)
-            print("✅ Tables created via emergency create_all")
-        except Exception as e2:
-            print(f"❌ Emergency create_all also failed: {e2}")
-    # Ensure any missing columns are added (safe to run on every startup)
-    try:
-        from sqlalchemy import text
-        from .database import engine
-        with engine.connect() as conn:
-            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS share_token VARCHAR"))
-            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP"))
-            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_share_token ON users (share_token)"))
-            conn.commit()
-        print("✅ Column migration check complete")
-    except Exception as e:
-        print(f"⚠️  Column migration check failed: {e}")
     try:
         init_cloudinary()
         print("✅ Cloudinary configured")
@@ -213,215 +176,6 @@ def validate_university_email(email: str) -> bool:
     )
 
 
-def generate_verification_code() -> str:
-    """Generate a secure 6-digit verification code"""
-    return ''.join(secrets.choice(string.digits) for _ in range(6))
-
-
-# ─── Auth Endpoints (Public - rate limited) ───
-@app.post("/api/signup", response_model=AuthResponse)
-@limiter.limit("5/minute")
-def signup(request: Request, data: SignupRequest, db: Session = Depends(get_db)):
-    """Create a new user account"""
-    import traceback
-    try:
-        return _signup_impl(request, data, db)
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"SIGNUP ERROR: {traceback.format_exc()}", flush=True)
-        raise HTTPException(status_code=500, detail=f"Signup failed: {str(e)}")
-
-def _signup_impl(request: Request, data: SignupRequest, db: Session):
-    email = data.email.lower()
-
-    # Validate university email
-    if not validate_university_email(email):
-        raise HTTPException(
-            status_code=400,
-            detail="Only McGill or Concordia student emails are allowed"
-        )
-
-    # Check for duplicate email
-    existing_user = db.query(User).filter(User.email == email).first()
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    # Hash password
-    hashed_password = pwd_context.hash(data.password)
-
-    # Determine university
-    university = get_university_from_email(email)
-
-    # Generate verification code
-    verification_code = generate_verification_code()
-    code_expires = datetime.now(timezone.utc) + timedelta(minutes=15)
-
-    new_user = User(
-        name=data.name.strip(),
-        email=email,
-        password_hash=hashed_password,
-        university=university,
-        email_verified=False,
-        verification_code=verification_code,
-        verification_code_expires=code_expires,
-        verification_attempts=0,
-    )
-
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-
-    # Send verification email in background (non-blocking)
-    parts = data.name.split() if data.name else []
-    first_name = parts[0] if parts else "there"
-    threading.Thread(
-        target=lambda: send_verification_code(email, first_name, verification_code),
-        daemon=True,
-    ).start()
-
-    is_dev = os.getenv("ENV", "development") != "production"
-    return AuthResponse(
-        message="Account created! Check your email for a verification code.",
-        user_id=new_user.id,
-        email=new_user.email,
-        name=new_user.name,
-        university=new_user.university,
-        questionnaire_completed=False,
-        token="",  # no token until verified
-        dev_code=verification_code if is_dev else None,
-    )
-
-
-@app.post("/api/login", response_model=AuthResponse)
-@limiter.limit("10/minute")
-def login(request: Request, data: LoginRequest, db: Session = Depends(get_db)):
-    """Authenticate user and return JWT token"""
-    email = data.email.lower()
-
-    # Find user
-    user = db.query(User).filter(User.email == email).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-
-    # Verify password
-    if not pwd_context.verify(data.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-
-    # Check email verified
-    if not user.email_verified:
-        raise HTTPException(
-            status_code=403,
-            detail="Please verify your email first. Check your inbox for the verification code.",
-        )
-
-    # Generate JWT token
-    token = create_token(user.id, user.email)
-
-    return AuthResponse(
-        message="Login successful",
-        user_id=user.id,
-        email=user.email,
-        name=user.name,
-        university=user.university,
-        questionnaire_completed=user.questionnaire_completed,
-        token=token
-    )
-
-
-# ─── Email Verification Endpoints (Public - rate limited) ───
-@app.post("/api/verify-email", response_model=VerifyEmailResponse)
-@limiter.limit("10/minute")
-def verify_email(request: Request, data: VerifyEmailRequest, db: Session = Depends(get_db)):
-    """Verify user email with the code sent to their inbox"""
-    email = data.email.lower()
-
-    # Find user
-    user = db.query(User).filter(User.email == email).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # Check if already verified
-    if user.email_verified:
-        return VerifyEmailResponse(message="Email already verified", email_verified=True)
-
-    # Check attempt limit
-    if user.verification_attempts >= MAX_VERIFICATION_ATTEMPTS:
-        raise HTTPException(
-            status_code=429,
-            detail="Too many verification attempts. Please request a new code."
-        )
-
-    # Check if code exists
-    if not user.verification_code:
-        raise HTTPException(status_code=400, detail="No verification code found. Please request a new one.")
-
-    # Check if code has expired (handle both naive and aware datetimes from DB)
-    if user.verification_code_expires:
-        expires = user.verification_code_expires
-        if expires.tzinfo is None:
-            expires = expires.replace(tzinfo=timezone.utc)
-        if datetime.now(timezone.utc) > expires:
-            raise HTTPException(status_code=400, detail="Verification code has expired. Please request a new one.")
-
-    # Increment attempt counter
-    user.verification_attempts += 1
-
-    # Verify code
-    if user.verification_code != data.code:
-        db.commit()
-        remaining = MAX_VERIFICATION_ATTEMPTS - user.verification_attempts
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid verification code. {remaining} attempts remaining."
-        )
-
-    # Mark email as verified
-    user.email_verified = True
-    user.verification_code = None
-    user.verification_code_expires = None
-    user.verification_attempts = 0
-    db.commit()
-
-    return VerifyEmailResponse(message="Email verified successfully! You can now log in.", email_verified=True)
-
-
-@app.post("/api/resend-verification-code")
-@limiter.limit("3/minute")
-def resend_verification_code(request: Request, data: ResendCodeRequest, db: Session = Depends(get_db)):
-    """Resend verification code to user's email"""
-    email = data.email.lower()
-
-    user = db.query(User).filter(User.email == email).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    if user.email_verified:
-        raise HTTPException(status_code=400, detail="Email already verified")
-
-    # Generate new code and reset attempts
-    verification_code = generate_verification_code()
-    code_expires = datetime.now(timezone.utc) + timedelta(minutes=15)
-
-    user.verification_code = verification_code
-    user.verification_code_expires = code_expires
-    user.verification_attempts = 0
-    db.commit()
-
-    parts = user.name.split() if user.name else []
-    first_name = parts[0] if parts else "there"
-    threading.Thread(
-        target=lambda: send_verification_code(email, first_name, verification_code),
-        daemon=True
-    ).start()
-
-    is_dev = os.getenv("ENV", "development") != "production"
-    return {
-        "message": "Verification code sent! Check your inbox.",
-        "dev_code": verification_code if is_dev else None
-    }
-
-
 # ─── Dev: Test Email ───
 @app.get("/api/dev/test-email")
 def test_email(to: str):
@@ -441,6 +195,27 @@ def test_email(to: str):
 
 
 # ─── Profile Endpoints (Authenticated) ───
+
+@app.get("/api/profile/me", response_model=UserProfile)
+def get_my_profile(
+    current_user: User = Depends(get_current_user)
+):
+    """Return the authenticated user's own profile — used after Supabase login"""
+    return UserProfile(
+        id=str(current_user.id),
+        name=current_user.name,
+        email=current_user.email,
+        university=current_user.university,
+        program=current_user.program,
+        bio=current_user.bio,
+        profile_pic_url=current_user.profile_pic_url,
+        social_links=current_user.social_links,
+        questionnaire_completed=current_user.questionnaire_completed,
+        created_at=current_user.created_at,
+        last_seen=current_user.last_seen,
+        is_online=(current_user.last_seen is None) and (str(current_user.id) in ws_manager.active_connections),
+    )
+
 
 # Feature 12: Public profile endpoint — no auth required.
 # IMPORTANT: this must be declared BEFORE /api/profile/{user_id} so FastAPI
@@ -466,15 +241,15 @@ def get_public_profile(share_token: str, db: Session = Depends(get_db)):
 # Also declared before /{user_id} to avoid route conflicts.
 @app.get("/api/profile/{user_id}/share-token")
 def get_share_token(
-    user_id: int,
+    user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Get or generate a shareable profile token for the user"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot get share token for another user")
 
-    user = db.query(User).filter(User.id == user_id).first()
+    user = db.query(User).filter(User.id == _uuid.UUID(user_id)).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -487,17 +262,17 @@ def get_share_token(
 
 @app.get("/api/profile/{user_id}", response_model=UserProfile)
 def get_profile(
-    user_id: int,
+    user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Get user profile by ID — must be authenticated"""
-    user = db.query(User).filter(User.id == user_id).first()
+    user = db.query(User).filter(User.id == _uuid.UUID(user_id)).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     # Feature 3: compute is_online — True when last_seen is None AND user has an active WS connection
-    is_online = (user.last_seen is None) and (user.id in ws_manager.active_connections)
+    is_online = (user.last_seen is None) and (str(user.id) in ws_manager.active_connections)
 
     return UserProfile(
         id=user.id,
@@ -517,16 +292,16 @@ def get_profile(
 
 @app.post("/api/profile/update")
 def update_profile(
-    user_id: int,
+    user_id: str,
     data: ProfileUpdateRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Update user profile (bio) - must be own profile"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot update another user's profile")
 
-    user = db.query(User).filter(User.id == user_id).first()
+    user = db.query(User).filter(User.id == _uuid.UUID(user_id)).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -545,16 +320,16 @@ def update_profile(
 @limiter.limit("3/minute")
 async def upload_picture(
     request: Request,
-    user_id: int,
+    user_id: str,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Upload profile picture to Cloudinary - must be own profile"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot upload picture for another user")
 
-    user = db.query(User).filter(User.id == user_id).first()
+    user = db.query(User).filter(User.id == _uuid.UUID(user_id)).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -589,7 +364,7 @@ async def upload_picture(
 
 
 # ─── Private helper: recalculate matches without sending emails (Feature 15) ───
-def _recalculate_matches_for_user(user_id: int, db: Session) -> None:
+def _recalculate_matches_for_user(user_id, db: Session) -> None:
     """Recalculate all match scores for a user — silent, no emails, no notifications."""
     user_questionnaire = db.query(QuestionnaireResponse).filter(
         QuestionnaireResponse.user_id == user_id
@@ -620,8 +395,9 @@ def _recalculate_matches_for_user(user_id: int, db: Session) -> None:
             if other_user.id in blocked_ids:
                 continue
 
-            user_a_id = min(user_id, other_user.id)
-            user_b_id = max(user_id, other_user.id)
+            uid_a, uid_b = sorted([user_id, other_user.id], key=str)
+            user_a_id = uid_a
+            user_b_id = uid_b
 
             existing_match = db.query(Match).filter(
                 Match.user1_id == user_a_id,
@@ -644,22 +420,23 @@ def _recalculate_matches_for_user(user_id: int, db: Session) -> None:
 # ─── Questionnaire Endpoints (Authenticated) ───
 @app.post("/api/questionnaire/submit")
 def submit_questionnaire(
-    user_id: int,
+    user_id: str,
     data: QuestionnaireSubmit,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Submit or update questionnaire responses"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot submit questionnaire for another user")
 
-    user = db.query(User).filter(User.id == user_id).first()
+    uid = _uuid.UUID(user_id)
+    user = db.query(User).filter(User.id == uid).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     # Check if questionnaire already exists
     existing = db.query(QuestionnaireResponse).filter(
-        QuestionnaireResponse.user_id == user_id
+        QuestionnaireResponse.user_id == uid
     ).first()
 
     if existing:
@@ -667,7 +444,7 @@ def submit_questionnaire(
         existing.completed_at = datetime.now(timezone.utc)
     else:
         questionnaire = QuestionnaireResponse(
-            user_id=user_id,
+            user_id=uid,
             responses=data.responses
         )
         db.add(questionnaire)
@@ -678,7 +455,7 @@ def submit_questionnaire(
 
     # Feature 15: If this is a retake, silently recalculate matches (no emails)
     if existing:
-        _recalculate_matches_for_user(user_id, db)
+        _recalculate_matches_for_user(uid, db)
 
     return {"message": "Questionnaire submitted successfully"}
 
@@ -688,21 +465,22 @@ def submit_questionnaire(
 @limiter.limit("5/minute")
 def calculate_matches(
     request: Request,
-    user_id: int,
+    user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Calculate and store matches for a user"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot calculate matches for another user")
 
-    user = db.query(User).filter(User.id == user_id).first()
+    uid = _uuid.UUID(user_id)
+    user = db.query(User).filter(User.id == uid).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     # Get user's questionnaire
     user_questionnaire = db.query(QuestionnaireResponse).filter(
-        QuestionnaireResponse.user_id == user_id
+        QuestionnaireResponse.user_id == uid
     ).first()
 
     if not user_questionnaire:
@@ -713,7 +491,7 @@ def calculate_matches(
     other_users = db.query(User).options(
         joinedload(User.questionnaire)
     ).filter(
-        User.id != user_id,
+        User.id != uid,
         User.questionnaire_completed == True
     ).limit(500).all()
 
@@ -732,27 +510,24 @@ def calculate_matches(
         # Only store matches with score > 50%
         if score > 50:
             # Block check: do not write a match if either user has blocked the other.
-            # Existing matches are hidden at the API layer (not deleted) when a block is created;
-            # this check only prevents new match rows from being written.
-            blocked_ids = get_blocked_user_ids(user_id, db)
+            blocked_ids = get_blocked_user_ids(uid, db)
             if other_user.id in blocked_ids:
                 continue
 
-            # Normalize match: always store smaller user_id first
-            user_a_id = min(user_id, other_user.id)
-            user_b_id = max(user_id, other_user.id)
+            # Normalize match: sort by string representation of UUID for consistency
+            uid_a, uid_b = sorted([uid, other_user.id], key=str)
 
             existing_match = db.query(Match).filter(
-                Match.user1_id == user_a_id,
-                Match.user2_id == user_b_id
+                Match.user1_id == uid_a,
+                Match.user2_id == uid_b
             ).first()
 
             if existing_match:
                 existing_match.compatibility_score = score
             else:
                 new_match = Match(
-                    user1_id=user_a_id,
-                    user2_id=user_b_id,
+                    user1_id=uid_a,
+                    user2_id=uid_b,
                     compatibility_score=score
                 )
                 db.add(new_match)
@@ -765,35 +540,36 @@ def calculate_matches(
 
 @app.get("/api/matches/{user_id}", response_model=List[MatchResponse])
 def get_matches(
-    user_id: int,
+    user_id: str,
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Get all matches for a user, sorted by compatibility score (paginated)"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot view another user's matches")
 
-    user = db.query(User).filter(User.id == user_id).first()
+    uid = _uuid.UUID(user_id)
+    user = db.query(User).filter(User.id == uid).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     # Get the set of blocked user IDs (bidirectional) to filter out from results.
     # Note: existing match rows are NOT deleted when a block is created — they are
     # hidden here at the API layer. If the block is later removed, matches reappear.
-    blocked_ids = get_blocked_user_ids(user_id, db)
+    blocked_ids = get_blocked_user_ids(uid, db)
 
     # Get matches with eager loading to avoid N+1
     matches = db.query(Match).filter(
-        (Match.user1_id == user_id) | (Match.user2_id == user_id)
+        (Match.user1_id == uid) | (Match.user2_id == uid)
     ).order_by(Match.compatibility_score.desc()).offset(skip).limit(limit).all()
 
     result = []
     # Batch load all other user ids, excluding blocked users
     other_user_ids = []
     for match in matches:
-        other_id = match.user2_id if match.user1_id == user_id else match.user1_id
+        other_id = match.user2_id if match.user1_id == uid else match.user1_id
         if other_id not in blocked_ids:
             other_user_ids.append(other_id)
 
@@ -810,7 +586,7 @@ def get_matches(
         questionnaire_map = {q.user_id: q for q in questionnaires}
 
     for match in matches:
-        other_user_id = match.user2_id if match.user1_id == user_id else match.user1_id
+        other_user_id = match.user2_id if match.user1_id == uid else match.user1_id
         # Skip blocked users (bidirectional)
         if other_user_id in blocked_ids:
             continue
@@ -866,29 +642,33 @@ def get_matches(
 @limiter.limit("10/minute")
 def explain_match(
     request: Request,
-    user_id: int,
-    other_user_id: int,
+    user_id: str,
+    other_user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Generate an AI-powered natural language explanation of why two users match"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
+    uid = _uuid.UUID(user_id)
+    other_uid = _uuid.UUID(other_user_id)
+
     # Get both users and their questionnaires
-    user = db.query(User).filter(User.id == user_id).first()
-    other_user = db.query(User).filter(User.id == other_user_id).first()
+    user = db.query(User).filter(User.id == uid).first()
+    other_user = db.query(User).filter(User.id == other_uid).first()
     if not user or not other_user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    user_q = db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == user_id).first()
-    other_q = db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == other_user_id).first()
+    user_q = db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == uid).first()
+    other_q = db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == other_uid).first()
     if not user_q or not other_q:
         raise HTTPException(status_code=400, detail="Both users must have completed questionnaires")
 
     # Check that the match actually exists
-    user_a_id = min(user_id, other_user_id)
-    user_b_id = max(user_id, other_user_id)
+    uid_a, uid_b = sorted([uid, other_uid], key=str)
+    user_a_id = uid_a
+    user_b_id = uid_b
     match = db.query(Match).filter(
         Match.user1_id == user_a_id,
         Match.user2_id == user_b_id
@@ -948,17 +728,19 @@ Write the explanation directly (no preamble like "Here is..." or "Based on...").
 @limiter.limit("30/minute")
 def get_match_breakdown(
     request: Request,
-    user_id: int,
-    other_user_id: int,
+    user_id: str,
+    other_user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Return per-category compatibility breakdown between two users."""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
-    user_q = db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == user_id).first()
-    other_q = db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == other_user_id).first()
+    uid = _uuid.UUID(user_id)
+    other_uid = _uuid.UUID(other_user_id)
+    user_q = db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == uid).first()
+    other_q = db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == other_uid).first()
     if not user_q or not other_q:
         raise HTTPException(status_code=400, detail="Both users must have completed questionnaires")
 
@@ -970,7 +752,7 @@ def get_match_breakdown(
 @limiter.limit("60/minute")
 def swipe_like(
     request: Request,
-    user_id: int,
+    user_id: str,
     data: SwipeRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -979,22 +761,25 @@ def swipe_like(
     Handle a swipe (like or pass) on a user.
     If it's a right swipe (like) and the other user has already liked back, it's a mutual match.
     """
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot swipe as another user")
 
+    uid = _uuid.UUID(user_id)
+    liked_uid = _uuid.UUID(data.liked_user_id)
+
     # Prevent self-swiping
-    if user_id == data.liked_user_id:
+    if uid == liked_uid:
         raise HTTPException(status_code=400, detail="Cannot swipe on yourself")
 
     # Verify the liked user exists
-    liked_user = db.query(User).filter(User.id == data.liked_user_id).first()
+    liked_user = db.query(User).filter(User.id == liked_uid).first()
     if not liked_user:
         raise HTTPException(status_code=404, detail="User not found")
 
     # Check if already swiped on this user
     existing_like = db.query(Like).filter(
-        Like.user_id == user_id,
-        Like.liked_user_id == data.liked_user_id
+        Like.user_id == uid,
+        Like.liked_user_id == liked_uid
     ).first()
 
     if existing_like:
@@ -1002,8 +787,8 @@ def swipe_like(
 
     # Create the like/pass record
     like = Like(
-        user_id=user_id,
-        liked_user_id=data.liked_user_id,
+        user_id=uid,
+        liked_user_id=liked_uid,
         is_like=data.is_like
     )
     db.add(like)
@@ -1025,8 +810,8 @@ def swipe_like(
 
         # Check if the other user has also liked this user back
         mutual_like = db.query(Like).filter(
-            Like.user_id == data.liked_user_id,
-            Like.liked_user_id == user_id,
+            Like.user_id == liked_uid,
+            Like.liked_user_id == uid,
             Like.is_like == True
         ).first()
 
@@ -1049,8 +834,8 @@ def swipe_like(
 
 @app.get("/api/swipes/check-like/{user_id1}/{user_id2}")
 def check_like(
-    user_id1: int,
-    user_id2: int,
+    user_id1: str,
+    user_id2: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -1058,12 +843,14 @@ def check_like(
     Check if user1 has liked user2.
     Used to determine if users can message each other.
     """
-    if current_user.id != user_id1:
+    if str(current_user.id) != user_id1:
         raise HTTPException(status_code=403, detail="Cannot check likes for another user")
 
+    uid1 = _uuid.UUID(user_id1)
+    uid2 = _uuid.UUID(user_id2)
     like = db.query(Like).filter(
-        Like.user_id == user_id1,
-        Like.liked_user_id == user_id2,
+        Like.user_id == uid1,
+        Like.liked_user_id == uid2,
         Like.is_like == True
     ).first()
 
@@ -1074,16 +861,17 @@ def check_like(
 @limiter.limit("30/minute")
 def get_swipe_history(
     request: Request,
-    user_id: int,
+    user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Get all users this person has liked (swiped right on)"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot view another user's swipes")
 
+    uid = _uuid.UUID(user_id)
     likes = db.query(Like).filter(
-        Like.user_id == user_id,
+        Like.user_id == uid,
         Like.is_like == True
     ).order_by(Like.created_at.desc()).all()
 
@@ -1129,33 +917,36 @@ def get_swipe_history(
 @limiter.limit("30/minute")
 async def send_message(
     request: Request,
-    sender_id: int,
+    sender_id: str,
     data: MessageSendRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Send a message to another user"""
-    if current_user.id != sender_id:
+    if str(current_user.id) != sender_id:
         raise HTTPException(status_code=403, detail="Cannot send messages as another user")
 
+    sender_uid = _uuid.UUID(sender_id)
+    recipient_uid = _uuid.UUID(data.recipient_id)
+
     # Prevent self-messaging
-    if sender_id == data.recipient_id:
+    if sender_uid == recipient_uid:
         raise HTTPException(status_code=400, detail="Cannot message yourself")
 
     # Verify recipient exists
-    recipient = db.query(User).filter(User.id == data.recipient_id).first()
+    recipient = db.query(User).filter(User.id == recipient_uid).first()
     if not recipient:
         raise HTTPException(status_code=404, detail="Recipient not found")
 
     # Block check: prevent messaging if either user has blocked the other
-    blocked_ids = get_blocked_user_ids(sender_id, db)
-    if data.recipient_id in blocked_ids:
+    blocked_ids = get_blocked_user_ids(sender_uid, db)
+    if recipient_uid in blocked_ids:
         raise HTTPException(status_code=403, detail="Cannot send message to this user")
 
     # Create message
     message = Message(
-        sender_id=sender_id,
-        recipient_id=data.recipient_id,
+        sender_id=sender_uid,
+        recipient_id=recipient_uid,
         content=data.content[:10000]
     )
 
@@ -1164,7 +955,7 @@ async def send_message(
     db.refresh(message)
 
     # Push via WebSocket if recipient is connected
-    await ws_manager.send_to_user(data.recipient_id, {
+    await ws_manager.send_to_user(str(recipient_uid), {
         "type": "new_message",
         "message_id": message.id,
         "sender_id": sender_id,
@@ -1180,32 +971,34 @@ async def send_message(
 @limiter.limit("30/minute")
 def get_conversations(
     request: Request,
-    user_id: int,
+    user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Get all conversations for a user with previews"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot view another user's conversations")
+
+    uid = _uuid.UUID(user_id)
 
     # Get blocked user IDs (bidirectional) to filter out from threads.
     # Note: existing message rows are NOT deleted when a block is created — they are
     # hidden here at the API layer. If the block is later removed, threads reappear.
-    blocked_ids = get_blocked_user_ids(user_id, db)
+    blocked_ids = get_blocked_user_ids(uid, db)
 
     # Single query: fetch all messages in the user's conversations (replaces N+1 queries)
     all_messages = db.query(Message).filter(
-        (Message.sender_id == user_id) | (Message.recipient_id == user_id)
+        (Message.sender_id == uid) | (Message.recipient_id == uid)
     ).order_by(Message.sent_at.desc()).all()
 
     # Build last_message and unread_count maps in Python from the single result set
     last_message_map = {}
     unread_count_map = {}
     for msg in all_messages:
-        partner = msg.recipient_id if msg.sender_id == user_id else msg.sender_id
+        partner = msg.recipient_id if msg.sender_id == uid else msg.sender_id
         if partner not in last_message_map:
             last_message_map[partner] = msg  # desc-ordered, so first seen is latest
-        if msg.recipient_id == user_id and not msg.read:
+        if msg.recipient_id == uid and not msg.read:
             unread_count_map[partner] = unread_count_map.get(partner, 0) + 1
 
     other_user_ids = set(last_message_map.keys())
@@ -1240,27 +1033,29 @@ def get_conversations(
 
 @app.get("/api/messages/thread/{user_id}/{other_user_id}", response_model=List[MessageResponse])
 def get_message_thread(
-    user_id: int,
-    other_user_id: int,
+    user_id: str,
+    other_user_id: str,
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Get paginated messages between two users"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot view another user's messages")
 
+    uid = _uuid.UUID(user_id)
+    other_uid = _uuid.UUID(other_user_id)
     messages = db.query(Message).filter(
-        ((Message.sender_id == user_id) & (Message.recipient_id == other_user_id)) |
-        ((Message.sender_id == other_user_id) & (Message.recipient_id == user_id))
+        ((Message.sender_id == uid) & (Message.recipient_id == other_uid)) |
+        ((Message.sender_id == other_uid) & (Message.recipient_id == uid))
     ).order_by(Message.sent_at.desc()).offset(skip).limit(limit).all()
     messages.reverse()  # Show oldest-first within the fetched page
 
     # Mark messages from other user as read
     db.query(Message).filter(
-        Message.sender_id == other_user_id,
-        Message.recipient_id == user_id,
+        Message.sender_id == other_uid,
+        Message.recipient_id == uid,
         Message.read == False
     ).update({"read": True})
     db.commit()
@@ -1290,13 +1085,13 @@ def mark_message_read(
 
 # ─── WebSocket Endpoint ───
 @app.websocket("/api/ws/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, user_id: int, token: str = Query(...)):
+async def websocket_endpoint(websocket: WebSocket, user_id: str, token: str = Query(...)):
     """WebSocket endpoint for real-time messaging. Authenticate via token query param."""
-    # Validate JWT token
+    # Validate Supabase JWT token
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        token_user_id = payload.get("user_id")
-        if token_user_id != user_id:
+        payload = jwt.decode(token, _JWT_SECRET, algorithms=["HS256"], options={"verify_aud": False})
+        token_sub = payload.get("sub")
+        if token_sub != user_id:
             await websocket.close(code=4003, reason="User ID mismatch")
             return
     except jwt.ExpiredSignatureError:
@@ -1308,10 +1103,12 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int, token: str = Qu
 
     await ws_manager.connect(user_id, websocket)
 
+    ws_uid = _uuid.UUID(user_id)
+
     # Feature 3: mark user as currently online (last_seen = None means "online right now")
     _ws_db = next(get_db())
     try:
-        db_user = _ws_db.query(User).filter(User.id == user_id).first()
+        db_user = _ws_db.query(User).filter(User.id == ws_uid).first()
         if db_user:
             db_user.last_seen = None
             _ws_db.commit()
@@ -1358,21 +1155,22 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int, token: str = Qu
                 # Save to database
                 db = next(get_db())
                 try:
-                    recipient = db.query(User).filter(User.id == recipient_id).first()
+                    r_uid = _uuid.UUID(recipient_id)
+                    recipient = db.query(User).filter(User.id == r_uid).first()
                     if not recipient:
                         await websocket.send_json({"type": "error", "detail": "Recipient not found"})
                         continue
 
                     # Block check: prevent messaging if either user has blocked the other
-                    blocked_ids = get_blocked_user_ids(user_id, db)
-                    if recipient_id in blocked_ids:
+                    blocked_ids = get_blocked_user_ids(ws_uid, db)
+                    if r_uid in blocked_ids:
                         await websocket.send_json({"type": "error", "detail": "Cannot send message to this user"})
                         continue
 
-                    sender = db.query(User).filter(User.id == user_id).first()
+                    sender = db.query(User).filter(User.id == ws_uid).first()
                     message = Message(
-                        sender_id=user_id,
-                        recipient_id=recipient_id,
+                        sender_id=ws_uid,
+                        recipient_id=r_uid,
                         content=content[:10000]
                     )
                     db.add(message)
@@ -1402,7 +1200,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int, token: str = Qu
                     db = next(get_db())
                     try:
                         msg = db.query(Message).filter(Message.id == message_id).first()
-                        if msg and msg.recipient_id == user_id:
+                        if msg and msg.recipient_id == ws_uid:
                             msg.read = True
                             db.commit()
                     finally:
@@ -1413,7 +1211,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int, token: str = Qu
         # Feature 3: record when the user went offline
         _ws_db = next(get_db())
         try:
-            db_user = _ws_db.query(User).filter(User.id == user_id).first()
+            db_user = _ws_db.query(User).filter(User.id == ws_uid).first()
             if db_user:
                 db_user.last_seen = datetime.now(timezone.utc)
                 _ws_db.commit()
@@ -1536,8 +1334,6 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
         }
     ]
 
-    password = "password123"
-    hashed_password = pwd_context.hash(password)
     created_users = []
 
     for fake_data in fake_users_data:
@@ -1548,11 +1344,9 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
         user = User(
             name=fake_data["name"],
             email=fake_data["email"],
-            password_hash=hashed_password,
             university=fake_data["university"],
             program=fake_data["program"],
             bio=fake_data["bio"],
-            email_verified=True,
             questionnaire_completed=True
         )
         db.add(user)
@@ -1578,105 +1372,11 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
 # Agent 2 — New Route Handlers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# ─── Password Reset ───
-
-@app.post("/api/auth/forgot-password")
-@limiter.limit("5/minute")
-def forgot_password(request: Request, data: ForgotPasswordRequest, db: Session = Depends(get_db)):
-    """
-    Request a password reset link. Always returns 200 to prevent account enumeration.
-    If the email exists, a reset link is sent via email.
-    """
-    ANTI_ENUM_MSG = "If that email is registered, you'll receive a reset link"
-
-    email = data.email.lower()
-    user = db.query(User).filter(User.email == email).first()
-
-    if user:
-        # Delete all existing tokens for this user (used or unused)
-        db.query(PasswordResetToken).filter(PasswordResetToken.user_id == user.id).delete()
-        db.commit()
-
-        # Generate a new token
-        token = secrets.token_urlsafe(32)
-        expires_at = datetime.utcnow() + timedelta(hours=1)
-        reset_token = PasswordResetToken(
-            user_id=user.id,
-            token=token,
-            expires_at=expires_at,
-            used=False
-        )
-        db.add(reset_token)
-        db.commit()
-
-        # Send reset email in background thread
-        reset_link = f"{FRONTEND_URL}/reset-password?token={token}"
-        parts = user.name.split() if user.name else []
-        first_name = parts[0] if parts else "there"
-        html_content = f"""
-        <h2>Password Reset Request</h2>
-        <p>Hi {first_name},</p>
-        <p>We received a request to reset your MatchMyRoom password.</p>
-        <p><a href="{reset_link}" style="background-color:#c8102e;color:white;padding:12px 24px;text-decoration:none;border-radius:4px;">Reset My Password</a></p>
-        <p>Or copy this link: {reset_link}</p>
-        <p>This link expires in 1 hour. If you didn't request this, you can ignore this email.</p>
-        """
-        threading.Thread(
-            target=lambda: send_email(email, "Reset your MatchMyRoom password", html_content),
-            daemon=True
-        ).start()
-
-    return {"message": ANTI_ENUM_MSG}
-
-
-@app.post("/api/auth/reset-password")
-@limiter.limit("5/minute")
-def reset_password(request: Request, data: ResetPasswordRequest, db: Session = Depends(get_db)):
-    """
-    Reset user password using a valid reset token.
-    Returns 400 if the token is invalid, expired, or already used.
-    """
-    # Look up token
-    reset_token = db.query(PasswordResetToken).filter(
-        PasswordResetToken.token == data.token
-    ).first()
-
-    if not reset_token:
-        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
-
-    if reset_token.used:
-        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
-
-    # Check expiry (stored as naive UTC datetime)
-    if reset_token.expires_at < datetime.utcnow():
-        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
-
-    # Hash new password and update user
-    user = db.query(User).filter(User.id == reset_token.user_id).first()
-    if not user:
-        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
-
-    user.password_hash = pwd_context.hash(data.new_password)
-
-    # Mark token as used
-    reset_token.used = True
-
-    # Cleanup: delete all expired tokens for this user
-    db.query(PasswordResetToken).filter(
-        PasswordResetToken.user_id == user.id,
-        PasswordResetToken.expires_at < datetime.utcnow(),
-    ).delete()
-
-    db.commit()
-
-    return {"message": "Password reset successfully"}
-
-
 # ─── Account Deletion ───
 
 @app.delete("/api/users/{user_id}")
 def delete_account(
-    user_id: int,
+    user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -1684,10 +1384,11 @@ def delete_account(
     Delete a user account and all associated data.
     JWT must belong to the user being deleted.
     """
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot delete another user's account")
 
-    user = db.query(User).filter(User.id == user_id).first()
+    uid = _uuid.UUID(user_id)
+    user = db.query(User).filter(User.id == uid).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -1695,43 +1396,40 @@ def delete_account(
 
     # 1. Reports
     db.query(Report).filter(
-        (Report.reporter_id == user_id) | (Report.reported_id == user_id)
+        (Report.reporter_id == uid) | (Report.reported_id == uid)
     ).delete(synchronize_session=False)
 
     # 2. Blocks
     db.query(Block).filter(
-        (Block.blocker_id == user_id) | (Block.blocked_id == user_id)
+        (Block.blocker_id == uid) | (Block.blocked_id == uid)
     ).delete(synchronize_session=False)
 
     # 3. Messages
     db.query(Message).filter(
-        (Message.sender_id == user_id) | (Message.recipient_id == user_id)
+        (Message.sender_id == uid) | (Message.recipient_id == uid)
     ).delete(synchronize_session=False)
 
     # 4. Likes
     db.query(Like).filter(
-        (Like.user_id == user_id) | (Like.liked_user_id == user_id)
+        (Like.user_id == uid) | (Like.liked_user_id == uid)
     ).delete(synchronize_session=False)
 
     # 5. Matches
     db.query(Match).filter(
-        (Match.user1_id == user_id) | (Match.user2_id == user_id)
+        (Match.user1_id == uid) | (Match.user2_id == uid)
     ).delete(synchronize_session=False)
 
-    # 6. Password reset tokens
-    db.query(PasswordResetToken).filter(PasswordResetToken.user_id == user_id).delete()
+    # 6. QuestionnaireResponse
+    db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == uid).delete()
 
-    # 7. Email verifications (QuestionnaireResponse handled by ondelete=CASCADE on user FK)
-    db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == user_id).delete()
-
-    # 8. Delete Cloudinary profile photo (best effort — do not raise if not found)
+    # 7. Delete Cloudinary profile photo (best effort — do not raise if not found)
     if user.profile_pic_url:
         try:
             delete_profile_picture(user.id)
         except Exception as e:
             print(f"Warning: Could not delete Cloudinary photo for user {user_id}: {e}")
 
-    # 9. Delete the user row
+    # 8. Delete the user row
     db.delete(user)
     db.commit()
 
@@ -1742,7 +1440,7 @@ def delete_account(
 
 @app.post("/api/users/{user_id}/block")
 def block_user(
-    user_id: int,
+    user_id: str,
     data: BlockRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -1752,26 +1450,29 @@ def block_user(
     Note: existing match rows and message threads are NOT deleted — they are hidden at the API layer.
     If the block is later removed, they will reappear.
     """
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot block as another user")
 
-    if data.blocked_user_id == user_id:
+    uid = _uuid.UUID(user_id)
+    blocked_uid = _uuid.UUID(data.blocked_user_id)
+
+    if uid == blocked_uid:
         raise HTTPException(status_code=400, detail="Cannot block yourself")
 
     # Check if target user exists
-    target = db.query(User).filter(User.id == data.blocked_user_id).first()
+    target = db.query(User).filter(User.id == blocked_uid).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
 
     # Check if already blocked
     existing = db.query(Block).filter(
-        Block.blocker_id == user_id,
-        Block.blocked_id == data.blocked_user_id
+        Block.blocker_id == uid,
+        Block.blocked_id == blocked_uid
     ).first()
     if existing:
         raise HTTPException(status_code=400, detail="User already blocked")
 
-    block = Block(blocker_id=user_id, blocked_id=data.blocked_user_id)
+    block = Block(blocker_id=uid, blocked_id=blocked_uid)
     db.add(block)
     db.commit()
 
@@ -1780,18 +1481,20 @@ def block_user(
 
 @app.delete("/api/users/{user_id}/block/{blocked_user_id}")
 def unblock_user(
-    user_id: int,
-    blocked_user_id: int,
+    user_id: str,
+    blocked_user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Remove a block. Once removed, matches and threads between the users reappear."""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot unblock as another user")
 
+    uid = _uuid.UUID(user_id)
+    blocked_uid = _uuid.UUID(blocked_user_id)
     block = db.query(Block).filter(
-        Block.blocker_id == user_id,
-        Block.blocked_id == blocked_user_id
+        Block.blocker_id == uid,
+        Block.blocked_id == blocked_uid
     ).first()
 
     if not block:
@@ -1805,7 +1508,7 @@ def unblock_user(
 
 @app.post("/api/users/{user_id}/report")
 def report_user(
-    user_id: int,
+    user_id: str,
     data: ReportRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -1813,20 +1516,23 @@ def report_user(
     """
     Report another user. Duplicate reports are allowed (append-only for moderation review).
     """
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot report as another user")
 
-    if data.reported_user_id == user_id:
+    uid = _uuid.UUID(user_id)
+    reported_uid = _uuid.UUID(data.reported_user_id)
+
+    if uid == reported_uid:
         raise HTTPException(status_code=400, detail="Cannot report yourself")
 
     # Check if target user exists
-    target = db.query(User).filter(User.id == data.reported_user_id).first()
+    target = db.query(User).filter(User.id == reported_uid).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
 
     report = Report(
-        reporter_id=user_id,
-        reported_id=data.reported_user_id,
+        reporter_id=uid,
+        reported_id=reported_uid,
         reason=data.reason
     )
     db.add(report)

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, Component } from "react";
+import { supabase } from "./lib/supabase.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const FONTS_LINK = "https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,500;0,9..144,700;0,9..144,900;1,9..144,400&display=swap";
@@ -34,13 +35,16 @@ class ErrorBoundary extends Component {
 }
 
 // ─── Auth Helper ───
-const authFetch = async (url, options = {}, token) => {
+const authFetch = async (url, options = {}, _deprecatedToken) => {
+  const { data: { session } } = await supabase.auth.getSession();
+  const token = session?.access_token;
   const headers = { ...options.headers };
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
   }
   const response = await fetch(url, { ...options, headers });
   if (response.status === 401) {
+    await supabase.auth.signOut();
     localStorage.removeItem("mmr_token");
     localStorage.removeItem("mmr_user");
     window.location.reload();
@@ -413,35 +417,27 @@ function AuthPage({ mode, setPage, setPendingEmail, setDevCode, onAuth }) {
 
     setLoading(true);
     try {
-      const endpoint = isSignup ? `${API_BASE}/signup` : `${API_BASE}/login`;
-      const body = isSignup ? { name, email, password } : { email, password };
-      const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      const data = await response.json();
-      if (!response.ok) {
-        // If email not verified, redirect to verification page
-        if (response.status === 403 && !isSignup) {
-          setPendingEmail(email);
-          setPage("verify");
-          setLoading(false);
-          return;
-        }
-        setError(data.detail || "An error occurred");
-        setLoading(false);
-        return;
-      }
-
-      // Signup requires email verification — token is empty until verified
-      if (isSignup && !data.token) {
+      if (isSignup) {
+        const university = email.endsWith("@concordia.ca") || email.endsWith("@live.concordia.ca") ? "concordia" : "mcgill";
+        const { error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: { data: { name: name.trim(), university } }
+        });
+        if (error) { setError(error.message); setLoading(false); return; }
         setPendingEmail(email);
-        if (data.dev_code) setDevCode(data.dev_code);
         setLoading(false);
         setPage("verify");
-        return;
+      } else {
+        const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) { setError(error.message); setLoading(false); return; }
+        const token = data.session.access_token;
+        const res = await fetch(`${API_BASE}/profile/me`, { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok) { setError("Login failed. Please try again."); setLoading(false); return; }
+        const profile = await res.json();
+        setLoading(false);
+        onAuth({ token, ...profile });
       }
-
-      applyTheme(data.university);
-      setLoading(false);
-      onAuth(data);
     } catch (err) { setError("Network error. Please try again."); setLoading(false); }
   };
 
@@ -477,160 +473,27 @@ function AuthPage({ mode, setPage, setPendingEmail, setDevCode, onAuth }) {
   );
 }
 
-function VerificationPage({ email, setPage, devCode: initialDevCode, setDevCode }) {
-  const [code, setCode] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [success, setSuccess] = useState(false);
-  const [localDevCode, setLocalDevCode] = useState(initialDevCode || "");
-  const shownDevCode = localDevCode || initialDevCode;
-
-  const handleVerify = async () => {
-    setError("");
-    if (code.length !== 6) return setError("Please enter the 6-digit code");
-
-    setLoading(true);
-    try {
-      const response = await fetch(`${API_BASE}/verify-email`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, code })
-      });
-      const data = await response.json();
-      
-      if (!response.ok) {
-        setError(data.detail || "Invalid code");
-        setLoading(false);
-        return;
-      }
-
-      setSuccess(true);
-      setTimeout(() => setPage("login"), 2000);
-    } catch (err) {
-      setError("Network error. Please try again.");
-      setLoading(false);
-    }
-  };
-
-  const handleResend = async () => {
-    setError("");
-    setLoading(true);
-    try {
-      const response = await fetch(`${API_BASE}/resend-verification-code`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email })
-      });
-      const data = await response.json();
-      
-      if (response.ok) {
-        setError("");
-        if (data.dev_code) {
-          setLocalDevCode(data.dev_code);
-          if (setDevCode) setDevCode(data.dev_code);
-        }
-      } else {
-        setError(data.detail || "Failed to resend code");
-      }
-      setLoading(false);
-    } catch (err) {
-      setError("Network error. Please try again.");
-      setLoading(false);
-    }
-  };
-
+function VerificationPage({ email, setPage }) {
   return (
     <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", paddingTop: 80, padding: "120px 24px 60px" }}>
-      <div className="anim-fade-up" style={{ width: "100%", maxWidth: 440, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 20, padding: 40 }}>
-        <div style={{ textAlign: "center", marginBottom: 32 }}>
-          <div style={{ fontSize: 56, marginBottom: 16 }}>📧</div>
-          <h2 style={{ fontFamily: font.display, fontSize: 28, fontWeight: 700, marginTop: 24, letterSpacing: "-0.02em" }}>Check your email</h2>
-          <p style={{ color: C.textMuted, fontSize: 14, marginTop: 8 }}>
-            We sent a 6-digit verification code to<br />
-            <strong style={{ color: C.accent }}>{email}</strong>
-          </p>
-          <p style={{ color: C.textMuted, fontSize: 13, marginTop: 12, padding: "10px 16px", background: C.surfaceLight, borderRadius: 8 }}>
-            <strong style={{ color: C.text }}>📬 Check your junk/spam folder</strong> if you don't see it in your inbox
-          </p>
-          {shownDevCode && (
-            <div style={{ marginTop: 12, padding: "12px 16px", background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 8 }}>
-              <div style={{ fontSize: 12, color: C.textDim, marginBottom: 4 }}>🛠️ Dev mode — your code:</div>
-              <div style={{ fontSize: 24, fontWeight: 700, color: C.green, letterSpacing: "6px", fontFamily: "monospace" }}>{shownDevCode}</div>
-            </div>
-          )}
+      <div className="anim-fade-up" style={{ width: "100%", maxWidth: 440, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 20, padding: 40, textAlign: "center" }}>
+        <div style={{ fontSize: 56, marginBottom: 16 }}>📧</div>
+        <h2 style={{ fontFamily: font.display, fontSize: 28, fontWeight: 700, marginTop: 8, letterSpacing: "-0.02em" }}>Check your email</h2>
+        <p style={{ color: C.textMuted, fontSize: 15, marginTop: 12, lineHeight: 1.6 }}>
+          We sent a verification link to<br />
+          <strong style={{ color: C.accent }}>{email}</strong>
+        </p>
+        <p style={{ color: C.textMuted, fontSize: 14, marginTop: 16, lineHeight: 1.6 }}>
+          Click the link in your email to activate your account, then come back here and log in.
+        </p>
+        <p style={{ color: C.textMuted, fontSize: 13, marginTop: 12, padding: "10px 16px", background: C.surfaceLight, borderRadius: 8 }}>
+          Check your <strong style={{ color: C.text }}>junk/spam folder</strong> if you don't see it within a minute.
+        </p>
+        <div style={{ marginTop: 32, fontSize: 14, color: C.textMuted }}>
+          <span style={{ color: C.accent, cursor: "pointer", fontWeight: 500 }} onClick={() => setPage("login")}>
+            ← Back to login
+          </span>
         </div>
-
-        {success ? (
-          <div style={{ padding: "20px", borderRadius: 12, background: "rgba(34, 197, 94, 0.1)", border: "1px solid rgba(34, 197, 94, 0.3)", textAlign: "center" }}>
-            <div style={{ fontSize: 32, marginBottom: 8 }}>✅</div>
-            <div style={{ color: "#22C55E", fontWeight: 600 }}>Email verified!</div>
-            <div style={{ color: C.textMuted, fontSize: 13, marginTop: 4 }}>Redirecting to login...</div>
-          </div>
-        ) : (
-          <>
-            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-              <div>
-                <label style={{ fontSize: 13, color: C.textMuted, marginBottom: 6, display: "block" }}>Verification Code</label>
-                <input 
-                  className="input-field" 
-                  placeholder="000000" 
-                  value={code} 
-                  onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                  onKeyDown={e => e.key === "Enter" && handleVerify()}
-                  style={{ fontSize: 24, letterSpacing: "8px", textAlign: "center", fontFamily: "monospace" }}
-                  maxLength={6}
-                  autoFocus
-                />
-              </div>
-
-              {error && (
-                <div style={{ padding: "12px 16px", borderRadius: 10, background: "rgba(237,27,47,0.1)", border: "1px solid rgba(237,27,47,0.2)", color: C.mcgillRed, fontSize: 14 }}>
-                  {error}
-                </div>
-              )}
-
-              <button 
-                className="btn-primary" 
-                style={{ width: "100%", padding: "15px", marginTop: 8, opacity: loading ? 0.7 : 1 }} 
-                onClick={handleVerify} 
-                disabled={loading || code.length !== 6}
-              >
-                {loading ? "Verifying..." : "Verify Email"}
-              </button>
-            </div>
-
-            <div style={{ textAlign: "center", marginTop: 24 }}>
-              <p style={{ fontSize: 13, color: C.textMuted }}>
-                Didn't receive the code?
-              </p>
-              <button 
-                onClick={handleResend}
-                disabled={loading}
-                style={{ 
-                  marginTop: 8,
-                  background: "none",
-                  border: "none",
-                  color: C.accent,
-                  cursor: "pointer",
-                  fontSize: 14,
-                  fontWeight: 600,
-                  textDecoration: "underline"
-                }}
-              >
-                Resend code
-              </button>
-            </div>
-
-            <div style={{ textAlign: "center", marginTop: 24, fontSize: 14, color: C.textMuted }}>
-              <span 
-                style={{ color: C.accent, cursor: "pointer", fontWeight: 500 }} 
-                onClick={() => setPage("login")}
-              >
-                ← Back to login
-              </span>
-            </div>
-          </>
-        )}
       </div>
     </div>
   );
@@ -1698,22 +1561,48 @@ export default function App() {
   const [pendingEmail, setPendingEmail] = useState("");
   const [devCode, setDevCode] = useState("");
 
-  // Restore session from localStorage on mount
+  // Restore session from Supabase on mount
   useEffect(() => {
-    const savedToken = localStorage.getItem("mmr_token");
-    const savedUser = localStorage.getItem("mmr_user");
-    if (savedToken && savedUser) {
-      try {
-        const userData = JSON.parse(savedUser);
-        setToken(savedToken);
-        setUser(userData);
-        applyTheme(userData.university);
-        setPage(userData.questionnaire_completed ? "dashboard" : "questionnaire");
-      } catch {
-        localStorage.removeItem("mmr_token");
-        localStorage.removeItem("mmr_user");
+    const restoreSession = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) {
+        const res = await fetch(`${API_BASE}/profile/me`, {
+          headers: { Authorization: `Bearer ${session.access_token}` }
+        });
+        if (res.ok) {
+          const profile = await res.json();
+          const userData = { token: session.access_token, ...profile, user_id: profile.id };
+          setToken(session.access_token);
+          setUser(userData);
+          applyTheme(userData.university);
+          setPage(userData.questionnaire_completed ? "dashboard" : "questionnaire");
+        }
       }
-    }
+    };
+    restoreSession();
+
+    // Listen for auth state changes (e.g. after email verification redirect)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === "SIGNED_IN" && session) {
+        const res = await fetch(`${API_BASE}/profile/me`, {
+          headers: { Authorization: `Bearer ${session.access_token}` }
+        });
+        if (res.ok) {
+          const profile = await res.json();
+          const userData = { token: session.access_token, ...profile, user_id: profile.id };
+          setToken(session.access_token);
+          setUser(userData);
+          applyTheme(userData.university);
+          setPage(userData.questionnaire_completed ? "dashboard" : "questionnaire");
+        }
+      } else if (event === "SIGNED_OUT") {
+        setUser(null);
+        setToken(null);
+        setPage("landing");
+      }
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
   useEffect(() => {
@@ -1730,13 +1619,14 @@ export default function App() {
 
   const handleAuth = (userData) => {
     const authToken = userData.token;
+    // Normalize: ensure user_id is always set (profile returns `id`)
+    const normalized = { ...userData, user_id: userData.user_id || userData.id };
     setToken(authToken);
-    setUser(userData);
-    localStorage.setItem("mmr_token", authToken);
-    localStorage.setItem("mmr_user", JSON.stringify(userData));
-    setPage(userData.questionnaire_completed ? "dashboard" : "questionnaire");
+    setUser(normalized);
+    setPage(normalized.questionnaire_completed ? "dashboard" : "questionnaire");
   };
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
     setUser(null);
     setToken(null);
     localStorage.removeItem("mmr_token");
