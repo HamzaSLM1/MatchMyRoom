@@ -2,58 +2,44 @@ from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Request, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session, joinedload
-from passlib.context import CryptContext
 from typing import List, Optional
 import os
 import secrets
-import string
 import jwt
 from dotenv import load_dotenv
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import threading
 import anthropic
 
 from .database import get_db, init_db
 from .models import User, QuestionnaireResponse, Match, Message, Like, PasswordResetToken, Block, Report
 from .schemas import (
-    SignupRequest, LoginRequest, AuthResponse,
     ProfileUpdateRequest, UserProfile,
     QuestionnaireSubmit,
     MatchResponse,
     MessageSendRequest, MessageResponse, ConversationPreview,
-    VerifyEmailRequest, VerifyEmailResponse, ResendCodeRequest,
     SwipeRequest, SwipeResponse, SwipeHistoryItem, SendInitialMessageRequest,
-    ForgotPasswordRequest, ResetPasswordRequest, BlockRequest, ReportRequest
+    BlockRequest, ReportRequest
 )
 from .matching import calculate_compatibility, calculate_compatibility_breakdown, get_question_text
 from .cloudinary_config import init_cloudinary, upload_profile_picture, delete_profile_picture
-from .email_service import send_new_matches_notification, send_welcome_email, send_verification_code, send_like_notification, send_mutual_match_notification, send_email
+from .email_service import send_new_matches_notification, send_like_notification, send_mutual_match_notification
 from .utils import get_blocked_user_ids
 
 # Load environment variables
 load_dotenv()
 
 # ─── Configuration ───
-JWT_SECRET = os.getenv("JWT_SECRET")
-if not JWT_SECRET:
-    raise RuntimeError(
-        "JWT_SECRET environment variable is required. "
-        "Set it in your .env file. Use: python -c \"import secrets; print(secrets.token_hex(32))\""
-    )
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_HOURS = 72
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
-MAX_VERIFICATION_ATTEMPTS = 5
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
     "http://localhost:5173"
 ).split(",")
 
-# Agent 2 env vars
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -76,8 +62,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Bearer token scheme
 security = HTTPBearer(auto_error=False)
@@ -88,14 +72,14 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[int, WebSocket] = {}
 
-    async def connect(self, user_id: int, websocket: WebSocket):
+    async def connect(self, user_id: str, websocket: WebSocket):
         await websocket.accept()
         self.active_connections[user_id] = websocket
 
-    def disconnect(self, user_id: int):
+    def disconnect(self, user_id: str):
         self.active_connections.pop(user_id, None)
 
-    async def send_to_user(self, user_id: int, message: dict) -> bool:
+    async def send_to_user(self, user_id: str, message: dict) -> bool:
         ws = self.active_connections.get(user_id)
         if ws:
             await ws.send_json(message)
@@ -107,38 +91,35 @@ ws_manager = ConnectionManager()
 
 
 # ─── JWT Helpers ───
-def create_token(user_id: int, email: str) -> str:
-    """Create a JWT token for authenticated user"""
-    payload = {
-        "user_id": user_id,
-        "email": email,
-        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS),
-        "iat": datetime.now(timezone.utc)
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-
-
+# ─── JWT Helpers ───
 def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: Session = Depends(get_db)
 ) -> User:
-    """Verify JWT token and return current user"""
+    """Verify Supabase JWT token and return current user"""
     if not credentials:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     try:
-        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        user_id = payload.get("user_id")
+        supabase_secret = os.getenv("SUPABASE_JWT_SECRET")
+        if not supabase_secret:
+            raise HTTPException(status_code=500, detail="SUPABASE_JWT_SECRET not configured")
+            
+        payload = jwt.decode(
+            credentials.credentials, 
+            supabase_secret, 
+            algorithms=["HS256"],
+            options={"verify_aud": False}
+        )
+        user_id = payload.get("sub")
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid token")
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
 
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+        raise HTTPException(status_code=401, detail="User not found in local database")
 
     return user
 
@@ -213,233 +194,6 @@ def validate_university_email(email: str) -> bool:
     )
 
 
-def generate_verification_code() -> str:
-    """Generate a secure 6-digit verification code"""
-    return ''.join(secrets.choice(string.digits) for _ in range(6))
-
-
-# ─── Auth Endpoints (Public - rate limited) ───
-@app.post("/api/signup", response_model=AuthResponse)
-@limiter.limit("5/minute")
-def signup(request: Request, data: SignupRequest, db: Session = Depends(get_db)):
-    """Create a new user account"""
-    import traceback
-    try:
-        return _signup_impl(request, data, db)
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"SIGNUP ERROR: {traceback.format_exc()}", flush=True)
-        raise HTTPException(status_code=500, detail=f"Signup failed: {str(e)}")
-
-def _signup_impl(request: Request, data: SignupRequest, db: Session):
-    email = data.email.lower()
-
-    # Validate university email
-    if not validate_university_email(email):
-        raise HTTPException(
-            status_code=400,
-            detail="Only McGill or Concordia student emails are allowed"
-        )
-
-    # Check for duplicate email
-    existing_user = db.query(User).filter(User.email == email).first()
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    # Hash password
-    hashed_password = pwd_context.hash(data.password)
-
-    # Determine university
-    university = get_university_from_email(email)
-
-    # Generate verification code
-    verification_code = generate_verification_code()
-    code_expires = datetime.now(timezone.utc) + timedelta(minutes=15)
-
-    new_user = User(
-        name=data.name.strip(),
-        email=email,
-        password_hash=hashed_password,
-        university=university,
-        email_verified=False,
-        verification_code=verification_code,
-        verification_code_expires=code_expires,
-        verification_attempts=0,
-    )
-
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-
-    # Send verification email in background (non-blocking)
-    parts = data.name.split() if data.name else []
-    first_name = parts[0] if parts else "there"
-    threading.Thread(
-        target=lambda: send_verification_code(email, first_name, verification_code),
-        daemon=True,
-    ).start()
-
-    is_dev = os.getenv("ENV", "development") != "production"
-    return AuthResponse(
-        message="Account created! Check your email for a verification code.",
-        user_id=new_user.id,
-        email=new_user.email,
-        name=new_user.name,
-        university=new_user.university,
-        questionnaire_completed=False,
-        token="",  # no token until verified
-        dev_code=verification_code if is_dev else None,
-    )
-
-
-@app.post("/api/login", response_model=AuthResponse)
-@limiter.limit("10/minute")
-def login(request: Request, data: LoginRequest, db: Session = Depends(get_db)):
-    """Authenticate user and return JWT token"""
-    email = data.email.lower()
-
-    # Find user
-    user = db.query(User).filter(User.email == email).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-
-    # Verify password
-    if not pwd_context.verify(data.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-
-    # Check email verified
-    if not user.email_verified:
-        raise HTTPException(
-            status_code=403,
-            detail="Please verify your email first. Check your inbox for the verification code.",
-        )
-
-    # Generate JWT token
-    token = create_token(user.id, user.email)
-
-    return AuthResponse(
-        message="Login successful",
-        user_id=user.id,
-        email=user.email,
-        name=user.name,
-        university=user.university,
-        questionnaire_completed=user.questionnaire_completed,
-        token=token
-    )
-
-
-# ─── Email Verification Endpoints (Public - rate limited) ───
-@app.post("/api/verify-email", response_model=VerifyEmailResponse)
-@limiter.limit("10/minute")
-def verify_email(request: Request, data: VerifyEmailRequest, db: Session = Depends(get_db)):
-    """Verify user email with the code sent to their inbox"""
-    email = data.email.lower()
-
-    # Find user
-    user = db.query(User).filter(User.email == email).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # Check if already verified
-    if user.email_verified:
-        return VerifyEmailResponse(message="Email already verified", email_verified=True)
-
-    # Check attempt limit
-    if user.verification_attempts >= MAX_VERIFICATION_ATTEMPTS:
-        raise HTTPException(
-            status_code=429,
-            detail="Too many verification attempts. Please request a new code."
-        )
-
-    # Check if code exists
-    if not user.verification_code:
-        raise HTTPException(status_code=400, detail="No verification code found. Please request a new one.")
-
-    # Check if code has expired (handle both naive and aware datetimes from DB)
-    if user.verification_code_expires:
-        expires = user.verification_code_expires
-        if expires.tzinfo is None:
-            expires = expires.replace(tzinfo=timezone.utc)
-        if datetime.now(timezone.utc) > expires:
-            raise HTTPException(status_code=400, detail="Verification code has expired. Please request a new one.")
-
-    # Increment attempt counter
-    user.verification_attempts += 1
-
-    # Verify code
-    if user.verification_code != data.code:
-        db.commit()
-        remaining = MAX_VERIFICATION_ATTEMPTS - user.verification_attempts
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid verification code. {remaining} attempts remaining."
-        )
-
-    # Mark email as verified
-    user.email_verified = True
-    user.verification_code = None
-    user.verification_code_expires = None
-    user.verification_attempts = 0
-    db.commit()
-
-    return VerifyEmailResponse(message="Email verified successfully! You can now log in.", email_verified=True)
-
-
-@app.post("/api/resend-verification-code")
-@limiter.limit("3/minute")
-def resend_verification_code(request: Request, data: ResendCodeRequest, db: Session = Depends(get_db)):
-    """Resend verification code to user's email"""
-    email = data.email.lower()
-
-    user = db.query(User).filter(User.email == email).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    if user.email_verified:
-        raise HTTPException(status_code=400, detail="Email already verified")
-
-    # Generate new code and reset attempts
-    verification_code = generate_verification_code()
-    code_expires = datetime.now(timezone.utc) + timedelta(minutes=15)
-
-    user.verification_code = verification_code
-    user.verification_code_expires = code_expires
-    user.verification_attempts = 0
-    db.commit()
-
-    parts = user.name.split() if user.name else []
-    first_name = parts[0] if parts else "there"
-    threading.Thread(
-        target=lambda: send_verification_code(email, first_name, verification_code),
-        daemon=True
-    ).start()
-
-    is_dev = os.getenv("ENV", "development") != "production"
-    return {
-        "message": "Verification code sent! Check your inbox.",
-        "dev_code": verification_code if is_dev else None
-    }
-
-
-# ─── Dev: Test Email ───
-@app.get("/api/dev/test-email")
-def test_email(to: str):
-    """Test email sending — dev only"""
-    if os.getenv("ENV", "development") == "production":
-        raise HTTPException(status_code=403, detail="Disabled in production")
-    from .email_service import send_email, RESEND_API_KEY, SMTP_USERNAME, SMTP_PASSWORD, FROM_EMAIL, SMTP_HOST, SMTP_PORT
-    config = {
-        "RESEND_API_KEY": "set" if RESEND_API_KEY else "NOT SET",
-        "SMTP_USERNAME": SMTP_USERNAME or "NOT SET",
-        "SMTP_HOST": SMTP_HOST,
-        "SMTP_PORT": SMTP_PORT,
-        "FROM_EMAIL": FROM_EMAIL,
-    }
-    result = send_email(to, "MatchMyRoom Test Email", "<p>Test email from MatchMyRoom. If you see this, email is working!</p>")
-    return {"sent": result, "config": config}
-
-
 # ─── Profile Endpoints (Authenticated) ───
 
 # Feature 12: Public profile endpoint — no auth required.
@@ -466,7 +220,7 @@ def get_public_profile(share_token: str, db: Session = Depends(get_db)):
 # Also declared before /{user_id} to avoid route conflicts.
 @app.get("/api/profile/{user_id}/share-token")
 def get_share_token(
-    user_id: int,
+    user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -487,7 +241,7 @@ def get_share_token(
 
 @app.get("/api/profile/{user_id}", response_model=UserProfile)
 def get_profile(
-    user_id: int,
+    user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -517,7 +271,7 @@ def get_profile(
 
 @app.post("/api/profile/update")
 def update_profile(
-    user_id: int,
+    user_id: str,
     data: ProfileUpdateRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -545,7 +299,7 @@ def update_profile(
 @limiter.limit("3/minute")
 async def upload_picture(
     request: Request,
-    user_id: int,
+    user_id: str,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -589,7 +343,7 @@ async def upload_picture(
 
 
 # ─── Private helper: recalculate matches without sending emails (Feature 15) ───
-def _recalculate_matches_for_user(user_id: int, db: Session) -> None:
+def _recalculate_matches_for_user(user_id: str, db: Session) -> None:
     """Recalculate all match scores for a user — silent, no emails, no notifications."""
     user_questionnaire = db.query(QuestionnaireResponse).filter(
         QuestionnaireResponse.user_id == user_id
@@ -644,7 +398,7 @@ def _recalculate_matches_for_user(user_id: int, db: Session) -> None:
 # ─── Questionnaire Endpoints (Authenticated) ───
 @app.post("/api/questionnaire/submit")
 def submit_questionnaire(
-    user_id: int,
+    user_id: str,
     data: QuestionnaireSubmit,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -688,7 +442,7 @@ def submit_questionnaire(
 @limiter.limit("5/minute")
 def calculate_matches(
     request: Request,
-    user_id: int,
+    user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -765,7 +519,7 @@ def calculate_matches(
 
 @app.get("/api/matches/{user_id}", response_model=List[MatchResponse])
 def get_matches(
-    user_id: int,
+    user_id: str,
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
     db: Session = Depends(get_db),
@@ -866,8 +620,8 @@ def get_matches(
 @limiter.limit("10/minute")
 def explain_match(
     request: Request,
-    user_id: int,
-    other_user_id: int,
+    user_id: str,
+    other_user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -948,8 +702,8 @@ Write the explanation directly (no preamble like "Here is..." or "Based on...").
 @limiter.limit("30/minute")
 def get_match_breakdown(
     request: Request,
-    user_id: int,
-    other_user_id: int,
+    user_id: str,
+    other_user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -970,7 +724,7 @@ def get_match_breakdown(
 @limiter.limit("60/minute")
 def swipe_like(
     request: Request,
-    user_id: int,
+    user_id: str,
     data: SwipeRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -1074,7 +828,7 @@ def check_like(
 @limiter.limit("30/minute")
 def get_swipe_history(
     request: Request,
-    user_id: int,
+    user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -1129,7 +883,7 @@ def get_swipe_history(
 @limiter.limit("30/minute")
 async def send_message(
     request: Request,
-    sender_id: int,
+    sender_id: str,
     data: MessageSendRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -1180,7 +934,7 @@ async def send_message(
 @limiter.limit("30/minute")
 def get_conversations(
     request: Request,
-    user_id: int,
+    user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -1240,8 +994,8 @@ def get_conversations(
 
 @app.get("/api/messages/thread/{user_id}/{other_user_id}", response_model=List[MessageResponse])
 def get_message_thread(
-    user_id: int,
-    other_user_id: int,
+    user_id: str,
+    other_user_id: str,
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -1290,19 +1044,16 @@ def mark_message_read(
 
 # ─── WebSocket Endpoint ───
 @app.websocket("/api/ws/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, user_id: int, token: str = Query(...)):
+async def websocket_endpoint(websocket: WebSocket, user_id: str, token: str = Query(...)):
     """WebSocket endpoint for real-time messaging. Authenticate via token query param."""
-    # Validate JWT token
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        token_user_id = payload.get("user_id")
+        supabase_secret = os.getenv("SUPABASE_JWT_SECRET")
+        payload = jwt.decode(token, supabase_secret, algorithms=["HS256"], options={"verify_aud": False})
+        token_user_id = payload.get("sub")
         if token_user_id != user_id:
             await websocket.close(code=4003, reason="User ID mismatch")
             return
-    except jwt.ExpiredSignatureError:
-        await websocket.close(code=4001, reason="Token expired")
-        return
-    except jwt.InvalidTokenError:
+    except Exception:
         await websocket.close(code=4001, reason="Invalid token")
         return
 
@@ -1536,8 +1287,6 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
         }
     ]
 
-    password = "password123"
-    hashed_password = pwd_context.hash(password)
     created_users = []
 
     for fake_data in fake_users_data:
@@ -1548,11 +1297,9 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
         user = User(
             name=fake_data["name"],
             email=fake_data["email"],
-            password_hash=hashed_password,
             university=fake_data["university"],
             program=fake_data["program"],
             bio=fake_data["bio"],
-            email_verified=True,
             questionnaire_completed=True
         )
         db.add(user)
@@ -1578,105 +1325,64 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
 # Agent 2 — New Route Handlers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# ─── Password Reset ───
+# ─── Supabase User Sync ───
 
-@app.post("/api/auth/forgot-password")
-@limiter.limit("5/minute")
-def forgot_password(request: Request, data: ForgotPasswordRequest, db: Session = Depends(get_db)):
-    """
-    Request a password reset link. Always returns 200 to prevent account enumeration.
-    If the email exists, a reset link is sent via email.
-    """
-    ANTI_ENUM_MSG = "If that email is registered, you'll receive a reset link"
-
-    email = data.email.lower()
-    user = db.query(User).filter(User.email == email).first()
-
-    if user:
-        # Delete all existing tokens for this user (used or unused)
-        db.query(PasswordResetToken).filter(PasswordResetToken.user_id == user.id).delete()
-        db.commit()
-
-        # Generate a new token
-        token = secrets.token_urlsafe(32)
-        expires_at = datetime.utcnow() + timedelta(hours=1)
-        reset_token = PasswordResetToken(
-            user_id=user.id,
-            token=token,
-            expires_at=expires_at,
-            used=False
+@app.post("/api/auth/sync-user")
+def sync_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    name: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    """Create user in Railway DB if they don't exist. Called by frontend after Supabase login."""
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        supabase_secret = os.getenv("SUPABASE_JWT_SECRET")
+        if not supabase_secret:
+            raise HTTPException(status_code=500, detail="SUPABASE_JWT_SECRET not configured")
+        payload = jwt.decode(
+            credentials.credentials,
+            supabase_secret,
+            algorithms=["HS256"],
+            options={"verify_aud": False}
         )
-        db.add(reset_token)
-        db.commit()
+        user_id = payload.get("sub")
+        user_email = payload.get("email")
+        if not user_id or not user_email:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
 
-        # Send reset email in background thread
-        reset_link = f"{FRONTEND_URL}/reset-password?token={token}"
-        parts = user.name.split() if user.name else []
-        first_name = parts[0] if parts else "there"
-        html_content = f"""
-        <h2>Password Reset Request</h2>
-        <p>Hi {first_name},</p>
-        <p>We received a request to reset your MatchMyRoom password.</p>
-        <p><a href="{reset_link}" style="background-color:#c8102e;color:white;padding:12px 24px;text-decoration:none;border-radius:4px;">Reset My Password</a></p>
-        <p>Or copy this link: {reset_link}</p>
-        <p>This link expires in 1 hour. If you didn't request this, you can ignore this email.</p>
-        """
-        threading.Thread(
-            target=lambda: send_email(email, "Reset your MatchMyRoom password", html_content),
-            daemon=True
-        ).start()
-
-    return {"message": ANTI_ENUM_MSG}
-
-
-@app.post("/api/auth/reset-password")
-@limiter.limit("5/minute")
-def reset_password(request: Request, data: ResetPasswordRequest, db: Session = Depends(get_db)):
-    """
-    Reset user password using a valid reset token.
-    Returns 400 if the token is invalid, expired, or already used.
-    """
-    # Look up token
-    reset_token = db.query(PasswordResetToken).filter(
-        PasswordResetToken.token == data.token
-    ).first()
-
-    if not reset_token:
-        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
-
-    if reset_token.used:
-        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
-
-    # Check expiry (stored as naive UTC datetime)
-    if reset_token.expires_at < datetime.utcnow():
-        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
-
-    # Hash new password and update user
-    user = db.query(User).filter(User.id == reset_token.user_id).first()
+    user = db.query(User).filter(User.id == user_id).first()
     if not user:
-        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+        university = get_university_from_email(user_email)
+        user = User(
+            id=user_id,
+            name=name or "User",
+            email=user_email,
+            university=university,
+            questionnaire_completed=False
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
 
-    user.password_hash = pwd_context.hash(data.new_password)
-
-    # Mark token as used
-    reset_token.used = True
-
-    # Cleanup: delete all expired tokens for this user
-    db.query(PasswordResetToken).filter(
-        PasswordResetToken.user_id == user.id,
-        PasswordResetToken.expires_at < datetime.utcnow(),
-    ).delete()
-
-    db.commit()
-
-    return {"message": "Password reset successfully"}
+    return {
+        "user_id": str(user.id),
+        "email": user.email,
+        "name": user.name,
+        "university": user.university,
+        "questionnaire_completed": user.questionnaire_completed
+    }
 
 
 # ─── Account Deletion ───
 
 @app.delete("/api/users/{user_id}")
 def delete_account(
-    user_id: int,
+    user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -1742,7 +1448,7 @@ def delete_account(
 
 @app.post("/api/users/{user_id}/block")
 def block_user(
-    user_id: int,
+    user_id: str,
     data: BlockRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -1780,8 +1486,8 @@ def block_user(
 
 @app.delete("/api/users/{user_id}/block/{blocked_user_id}")
 def unblock_user(
-    user_id: int,
-    blocked_user_id: int,
+    user_id: str,
+    blocked_user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -1805,7 +1511,7 @@ def unblock_user(
 
 @app.post("/api/users/{user_id}/report")
 def report_user(
-    user_id: int,
+    user_id: str,
     data: ReportRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
