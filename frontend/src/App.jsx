@@ -428,8 +428,27 @@ function AuthPage({ mode, setPage, setPendingEmail, onAuth }) {
           setLoading(false);
           return;
         }
-        setPendingEmail(email);
-        setPage("verify");
+        if (data.session) {
+          // Email confirmation is off — user is logged in immediately
+          const syncRes = await fetch(`${API_BASE}/auth/sync-user?name=${encodeURIComponent(name)}`, {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${data.session.access_token}` }
+          });
+          if (!syncRes.ok) { setError("Failed to sync account. Please try again."); setLoading(false); return; }
+          const syncData = await syncRes.json();
+          applyTheme(syncData.university);
+          onAuth({
+            user_id: syncData.user_id,
+            email: syncData.email,
+            name: syncData.name,
+            university: syncData.university,
+            questionnaire_completed: syncData.questionnaire_completed,
+            token: data.session.access_token
+          });
+        } else {
+          setPendingEmail(email);
+          setPage("verify");
+        }
       } else {
         const { data, error: signInError } = await supabase.auth.signInWithPassword({
           email,
