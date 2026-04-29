@@ -22,17 +22,17 @@ APP_URL = os.getenv("APP_URL", "http://localhost:3000")
 
 
 def send_email(to_email: str, subject: str, html_content: str) -> bool:
-    """Send an email — SMTP preferred (Gmail), Resend as fallback if no SMTP configured"""
+    """Send an email — Resend preferred, SMTP as fallback if Resend is not configured"""
 
-    # SMTP takes priority: it's what was working (matchmyroom.mcgill@gmail.com).
-    # Resend only used when SMTP credentials are absent.
+    # Resend takes priority when an API key is present.
+    if RESEND_API_KEY:
+        return _send_via_resend(to_email, subject, html_content)
+
+    # Fall back to SMTP if Resend is not configured.
     if SMTP_USERNAME and SMTP_PASSWORD:
         return _send_via_smtp(to_email, subject, html_content)
 
-    if RESEND_API_KEY and FROM_EMAIL != "onboarding@resend.dev":
-        return _send_via_resend(to_email, subject, html_content)
-
-    print("⚠️  Email not configured. Set SMTP_USERNAME + SMTP_PASSWORD in Railway env vars.")
+    print("⚠️  Email not configured. Set RESEND_API_KEY in Railway env vars.")
     return False
 
 
