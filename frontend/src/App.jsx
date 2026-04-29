@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, Component } from "react";
+import { supabase } from "./supabaseClient";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const FONTS_LINK = "https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,500;0,9..144,700;0,9..144,900;1,9..144,400&display=swap";
@@ -36,13 +37,14 @@ class ErrorBoundary extends Component {
 // ─── Auth Helper ───
 const authFetch = async (url, options = {}, token) => {
   const headers = { ...options.headers };
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
+  // Fetch session directly from Supabase
+  const { data: { session } } = await supabase.auth.getSession();
+  if (session && session.access_token) {
+    headers["Authorization"] = `Bearer ${session.access_token}`;
   }
   const response = await fetch(url, { ...options, headers });
   if (response.status === 401) {
-    localStorage.removeItem("mmr_token");
-    localStorage.removeItem("mmr_user");
+    await supabase.auth.signOut();
     window.location.reload();
   }
   return response;
@@ -392,7 +394,7 @@ function TermsOfServicePage({ setPage }) {
   );
 }
 
-function AuthPage({ mode, setPage, setPendingEmail, setDevCode, onAuth }) {
+function AuthPage({ mode, setPage, setPendingEmail, onAuth }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -413,36 +415,49 @@ function AuthPage({ mode, setPage, setPendingEmail, setDevCode, onAuth }) {
 
     setLoading(true);
     try {
-      const endpoint = isSignup ? `${API_BASE}/signup` : `${API_BASE}/login`;
-      const body = isSignup ? { name, email, password } : { email, password };
-      const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      const data = await response.json();
-      if (!response.ok) {
-        // If email not verified, redirect to verification page
-        if (response.status === 403 && !isSignup) {
-          setPendingEmail(email);
-          setPage("verify");
+      if (isSignup) {
+        const { data, error: signUpError } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: { name }
+          }
+        });
+        if (signUpError) {
+          setError(signUpError.message);
           setLoading(false);
           return;
         }
-        setError(data.detail || "An error occurred");
-        setLoading(false);
-        return;
-      }
-
-      // Signup requires email verification — token is empty until verified
-      if (isSignup && !data.token) {
         setPendingEmail(email);
-        if (data.dev_code) setDevCode(data.dev_code);
-        setLoading(false);
         setPage("verify");
-        return;
+      } else {
+        const { data, error: signInError } = await supabase.auth.signInWithPassword({
+          email,
+          password
+        });
+        if (signInError) {
+          setError(signInError.message);
+          setLoading(false);
+          return;
+        }
+        const syncRes = await fetch(`${API_BASE}/auth/sync-user?name=${encodeURIComponent(data.user.user_metadata?.name || "User")}`, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${data.session.access_token}` }
+        });
+        if (!syncRes.ok) { setError("Failed to sync account. Please try again."); setLoading(false); return; }
+        const syncData = await syncRes.json();
+        applyTheme(syncData.university);
+        onAuth({
+          user_id: syncData.user_id,
+          email: syncData.email,
+          name: syncData.name,
+          university: syncData.university,
+          questionnaire_completed: syncData.questionnaire_completed,
+          token: data.session.access_token
+        });
       }
-
-      applyTheme(data.university);
-      setLoading(false);
-      onAuth(data);
-    } catch (err) { setError("Network error. Please try again."); setLoading(false); }
+    } catch (err) { setError("Network error. Please try again."); }
+    setLoading(false);
   };
 
   return (
@@ -477,13 +492,11 @@ function AuthPage({ mode, setPage, setPendingEmail, setDevCode, onAuth }) {
   );
 }
 
-function VerificationPage({ email, setPage, devCode: initialDevCode, setDevCode }) {
+function VerificationPage({ email, setPage }) {
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
-  const [localDevCode, setLocalDevCode] = useState(initialDevCode || "");
-  const shownDevCode = localDevCode || initialDevCode;
 
   const handleVerify = async () => {
     setError("");
@@ -491,15 +504,14 @@ function VerificationPage({ email, setPage, devCode: initialDevCode, setDevCode 
 
     setLoading(true);
     try {
-      const response = await fetch(`${API_BASE}/verify-email`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, code })
+      const { data, error: verifyError } = await supabase.auth.verifyOtp({
+        email,
+        token: code,
+        type: 'signup'
       });
-      const data = await response.json();
       
-      if (!response.ok) {
-        setError(data.detail || "Invalid code");
+      if (verifyError) {
+        setError(verifyError.message);
         setLoading(false);
         return;
       }
@@ -516,21 +528,13 @@ function VerificationPage({ email, setPage, devCode: initialDevCode, setDevCode 
     setError("");
     setLoading(true);
     try {
-      const response = await fetch(`${API_BASE}/resend-verification-code`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email })
+      const { error: resendError } = await supabase.auth.resend({
+        type: 'signup',
+        email,
       });
-      const data = await response.json();
       
-      if (response.ok) {
-        setError("");
-        if (data.dev_code) {
-          setLocalDevCode(data.dev_code);
-          if (setDevCode) setDevCode(data.dev_code);
-        }
-      } else {
-        setError(data.detail || "Failed to resend code");
+      if (resendError) {
+        setError(resendError.message);
       }
       setLoading(false);
     } catch (err) {
@@ -552,12 +556,6 @@ function VerificationPage({ email, setPage, devCode: initialDevCode, setDevCode 
           <p style={{ color: C.textMuted, fontSize: 13, marginTop: 12, padding: "10px 16px", background: C.surfaceLight, borderRadius: 8 }}>
             <strong style={{ color: C.text }}>📬 Check your junk/spam folder</strong> if you don't see it in your inbox
           </p>
-          {shownDevCode && (
-            <div style={{ marginTop: 12, padding: "12px 16px", background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 8 }}>
-              <div style={{ fontSize: 12, color: C.textDim, marginBottom: 4 }}>🛠️ Dev mode — your code:</div>
-              <div style={{ fontSize: 24, fontWeight: 700, color: C.green, letterSpacing: "6px", fontFamily: "monospace" }}>{shownDevCode}</div>
-            </div>
-          )}
         </div>
 
         {success ? (
@@ -1698,22 +1696,48 @@ export default function App() {
   const [pendingEmail, setPendingEmail] = useState("");
   const [devCode, setDevCode] = useState("");
 
-  // Restore session from localStorage on mount
+  const syncSession = async (session) => {
+    try {
+      const name = session.user.user_metadata?.name || "User";
+      const res = await fetch(`${API_BASE}/auth/sync-user?name=${encodeURIComponent(name)}`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${session.access_token}` }
+      });
+      if (!res.ok) return null;
+      const syncData = await res.json();
+      return { ...syncData, token: session.access_token };
+    } catch { return null; }
+  };
+
+  // Restore session from Supabase
   useEffect(() => {
-    const savedToken = localStorage.getItem("mmr_token");
-    const savedUser = localStorage.getItem("mmr_user");
-    if (savedToken && savedUser) {
-      try {
-        const userData = JSON.parse(savedUser);
-        setToken(savedToken);
-        setUser(userData);
-        applyTheme(userData.university);
-        setPage(userData.questionnaire_completed ? "dashboard" : "questionnaire");
-      } catch {
-        localStorage.removeItem("mmr_token");
-        localStorage.removeItem("mmr_user");
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
+      if (session) {
+        const userData = await syncSession(session);
+        if (userData) {
+          setToken(session.access_token);
+          setUser(userData);
+          applyTheme(userData.university);
+          setPage(userData.questionnaire_completed ? "dashboard" : "questionnaire");
+        }
       }
-    }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (session) {
+        const userData = await syncSession(session);
+        if (userData) {
+          setToken(session.access_token);
+          setUser(userData);
+          applyTheme(userData.university);
+        }
+      } else {
+        setToken(null);
+        setUser(null);
+        setPage("landing");
+      }
+    });
+    return () => subscription.unsubscribe();
   }, []);
 
   useEffect(() => {
@@ -1732,15 +1756,12 @@ export default function App() {
     const authToken = userData.token;
     setToken(authToken);
     setUser(userData);
-    localStorage.setItem("mmr_token", authToken);
-    localStorage.setItem("mmr_user", JSON.stringify(userData));
     setPage(userData.questionnaire_completed ? "dashboard" : "questionnaire");
   };
   const handleLogout = () => {
     setUser(null);
     setToken(null);
-    localStorage.removeItem("mmr_token");
-    localStorage.removeItem("mmr_user");
+    supabase.auth.signOut();
     setPage("landing");
   };
   const handleQuestionnaireComplete = () => setPage("dashboard");
