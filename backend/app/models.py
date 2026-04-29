@@ -1,7 +1,9 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, JSON, Float, ForeignKey, Index, PrimaryKeyConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
+from sqlalchemy.dialects.postgresql import UUID
 from datetime import datetime, timezone
+import uuid
 
 
 Base = declarative_base()
@@ -10,22 +12,15 @@ Base = declarative_base()
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     name = Column(String(200), nullable=False)
     email = Column(String, unique=True, nullable=False, index=True)
-    password_hash = Column(String, nullable=False)
-    university = Column(String, nullable=False)  # "mcgill" or "concordia"
+    university = Column(String, nullable=True)  # "mcgill" or "concordia"
     program = Column(String(100), nullable=True)  # User's program/faculty of study
     bio = Column(String(500), nullable=True)  # User bio/description
     profile_pic_url = Column(String, nullable=True)  # Cloudinary URL
     social_links = Column(JSON, nullable=True)  # { instagram, linkedin, twitter }
     questionnaire_completed = Column(Boolean, default=False)
-
-    # Email verification
-    email_verified = Column(Boolean, default=False)
-    verification_code = Column(String, nullable=True)
-    verification_code_expires = Column(DateTime, nullable=True)
-    verification_attempts = Column(Integer, default=0)
 
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -48,7 +43,7 @@ class QuestionnaireResponse(Base):
     __tablename__ = "questionnaire_responses"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     responses = Column(JSON, nullable=False)  # Store as JSON object
     completed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -60,8 +55,8 @@ class Match(Base):
     __tablename__ = "matches"
 
     id = Column(Integer, primary_key=True, index=True)
-    user1_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    user2_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    user1_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    user2_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     compatibility_score = Column(Float, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -79,8 +74,8 @@ class Like(Base):
     __tablename__ = "likes"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    liked_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    liked_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     is_like = Column(Boolean, nullable=False)  # True for right swipe (like), False for left swipe (pass)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
@@ -99,8 +94,8 @@ class Message(Base):
     __tablename__ = "messages"
 
     id = Column(Integer, primary_key=True, index=True)
-    sender_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    recipient_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    sender_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    recipient_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     content = Column(String(10000), nullable=False)
     sent_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
     read = Column(Boolean, default=False)
@@ -122,7 +117,7 @@ class PasswordResetToken(Base):
     __tablename__ = "password_reset_tokens"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     token = Column(String, unique=True, index=True, nullable=False)
     expires_at = Column(DateTime, nullable=False)
     used = Column(Boolean, default=False, nullable=False)
@@ -134,8 +129,8 @@ class PasswordResetToken(Base):
 class Block(Base):
     __tablename__ = "blocks"
 
-    blocker_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    blocked_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    blocker_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    blocked_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
@@ -152,8 +147,8 @@ class Report(Base):
     __tablename__ = "reports"
 
     id = Column(Integer, primary_key=True, index=True)
-    reporter_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    reported_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    reporter_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    reported_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     reason = Column(String, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
