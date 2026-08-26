@@ -157,6 +157,14 @@ def startup_event():
 
 
 # ─── Helper Functions ───
+def _parse_uuid(value: str) -> _uuid.UUID:
+    """Parse a UUID string, raising HTTP 422 on invalid format."""
+    try:
+        return _uuid.UUID(value)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=422, detail=f"Invalid UUID format: {value}")
+
+
 def get_university_from_email(email: str) -> str:
     """Determine university from email domain"""
     email_lower = email.lower()
@@ -249,7 +257,7 @@ def get_share_token(
     if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot get share token for another user")
 
-    user = db.query(User).filter(User.id == _uuid.UUID(user_id)).first()
+    user = db.query(User).filter(User.id == _parse_uuid(user_id)).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -267,7 +275,7 @@ def get_profile(
     current_user: User = Depends(get_current_user)
 ):
     """Get user profile by ID — must be authenticated"""
-    user = db.query(User).filter(User.id == _uuid.UUID(user_id)).first()
+    user = db.query(User).filter(User.id == _parse_uuid(user_id)).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -275,7 +283,7 @@ def get_profile(
     is_online = (user.last_seen is None) and (str(user.id) in ws_manager.active_connections)
 
     return UserProfile(
-        id=user.id,
+        id=str(user.id),
         name=user.name,
         email=user.email,
         university=user.university,
@@ -301,7 +309,7 @@ def update_profile(
     if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot update another user's profile")
 
-    user = db.query(User).filter(User.id == _uuid.UUID(user_id)).first()
+    user = db.query(User).filter(User.id == _parse_uuid(user_id)).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -329,7 +337,7 @@ async def upload_picture(
     if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot upload picture for another user")
 
-    user = db.query(User).filter(User.id == _uuid.UUID(user_id)).first()
+    user = db.query(User).filter(User.id == _parse_uuid(user_id)).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -429,7 +437,7 @@ def submit_questionnaire(
     if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot submit questionnaire for another user")
 
-    uid = _uuid.UUID(user_id)
+    uid = _parse_uuid(user_id)
     user = db.query(User).filter(User.id == uid).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -473,7 +481,7 @@ def calculate_matches(
     if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot calculate matches for another user")
 
-    uid = _uuid.UUID(user_id)
+    uid = _parse_uuid(user_id)
     user = db.query(User).filter(User.id == uid).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -550,7 +558,7 @@ def get_matches(
     if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot view another user's matches")
 
-    uid = _uuid.UUID(user_id)
+    uid = _parse_uuid(user_id)
     user = db.query(User).filter(User.id == uid).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -651,8 +659,8 @@ def explain_match(
     if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
-    uid = _uuid.UUID(user_id)
-    other_uid = _uuid.UUID(other_user_id)
+    uid = _parse_uuid(user_id)
+    other_uid = _parse_uuid(other_user_id)
 
     # Get both users and their questionnaires
     user = db.query(User).filter(User.id == uid).first()
@@ -737,8 +745,8 @@ def get_match_breakdown(
     if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
-    uid = _uuid.UUID(user_id)
-    other_uid = _uuid.UUID(other_user_id)
+    uid = _parse_uuid(user_id)
+    other_uid = _parse_uuid(other_user_id)
     user_q = db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == uid).first()
     other_q = db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == other_uid).first()
     if not user_q or not other_q:
@@ -764,8 +772,8 @@ def swipe_like(
     if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot swipe as another user")
 
-    uid = _uuid.UUID(user_id)
-    liked_uid = _uuid.UUID(data.liked_user_id)
+    uid = _parse_uuid(user_id)
+    liked_uid = _parse_uuid(data.liked_user_id)
 
     # Prevent self-swiping
     if uid == liked_uid:
@@ -846,8 +854,8 @@ def check_like(
     if str(current_user.id) != user_id1:
         raise HTTPException(status_code=403, detail="Cannot check likes for another user")
 
-    uid1 = _uuid.UUID(user_id1)
-    uid2 = _uuid.UUID(user_id2)
+    uid1 = _parse_uuid(user_id1)
+    uid2 = _parse_uuid(user_id2)
     like = db.query(Like).filter(
         Like.user_id == uid1,
         Like.liked_user_id == uid2,
@@ -869,7 +877,7 @@ def get_swipe_history(
     if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot view another user's swipes")
 
-    uid = _uuid.UUID(user_id)
+    uid = _parse_uuid(user_id)
     likes = db.query(Like).filter(
         Like.user_id == uid,
         Like.is_like == True
@@ -926,8 +934,8 @@ async def send_message(
     if str(current_user.id) != sender_id:
         raise HTTPException(status_code=403, detail="Cannot send messages as another user")
 
-    sender_uid = _uuid.UUID(sender_id)
-    recipient_uid = _uuid.UUID(data.recipient_id)
+    sender_uid = _parse_uuid(sender_id)
+    recipient_uid = _parse_uuid(data.recipient_id)
 
     # Prevent self-messaging
     if sender_uid == recipient_uid:
@@ -979,7 +987,7 @@ def get_conversations(
     if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot view another user's conversations")
 
-    uid = _uuid.UUID(user_id)
+    uid = _parse_uuid(user_id)
 
     # Get blocked user IDs (bidirectional) to filter out from threads.
     # Note: existing message rows are NOT deleted when a block is created — they are
@@ -1044,8 +1052,8 @@ def get_message_thread(
     if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot view another user's messages")
 
-    uid = _uuid.UUID(user_id)
-    other_uid = _uuid.UUID(other_user_id)
+    uid = _parse_uuid(user_id)
+    other_uid = _parse_uuid(other_user_id)
     messages = db.query(Message).filter(
         ((Message.sender_id == uid) & (Message.recipient_id == other_uid)) |
         ((Message.sender_id == other_uid) & (Message.recipient_id == uid))
@@ -1103,7 +1111,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, token: str = Qu
 
     await ws_manager.connect(user_id, websocket)
 
-    ws_uid = _uuid.UUID(user_id)
+    ws_uid = _parse_uuid(user_id)
 
     # Feature 3: mark user as currently online (last_seen = None means "online right now")
     _ws_db = next(get_db())
@@ -1155,7 +1163,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, token: str = Qu
                 # Save to database
                 db = next(get_db())
                 try:
-                    r_uid = _uuid.UUID(recipient_id)
+                    r_uid = _parse_uuid(recipient_id)
                     recipient = db.query(User).filter(User.id == r_uid).first()
                     if not recipient:
                         await websocket.send_json({"type": "error", "detail": "Recipient not found"})
@@ -1387,7 +1395,7 @@ def delete_account(
     if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot delete another user's account")
 
-    uid = _uuid.UUID(user_id)
+    uid = _parse_uuid(user_id)
     user = db.query(User).filter(User.id == uid).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -1453,8 +1461,8 @@ def block_user(
     if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot block as another user")
 
-    uid = _uuid.UUID(user_id)
-    blocked_uid = _uuid.UUID(data.blocked_user_id)
+    uid = _parse_uuid(user_id)
+    blocked_uid = _parse_uuid(data.blocked_user_id)
 
     if uid == blocked_uid:
         raise HTTPException(status_code=400, detail="Cannot block yourself")
@@ -1490,8 +1498,8 @@ def unblock_user(
     if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot unblock as another user")
 
-    uid = _uuid.UUID(user_id)
-    blocked_uid = _uuid.UUID(blocked_user_id)
+    uid = _parse_uuid(user_id)
+    blocked_uid = _parse_uuid(blocked_user_id)
     block = db.query(Block).filter(
         Block.blocker_id == uid,
         Block.blocked_id == blocked_uid
@@ -1519,8 +1527,8 @@ def report_user(
     if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot report as another user")
 
-    uid = _uuid.UUID(user_id)
-    reported_uid = _uuid.UUID(data.reported_user_id)
+    uid = _parse_uuid(user_id)
+    reported_uid = _parse_uuid(data.reported_user_id)
 
     if uid == reported_uid:
         raise HTTPException(status_code=400, detail="Cannot report yourself")

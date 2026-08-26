@@ -2,6 +2,8 @@
 
 from tests.conftest import auth_header
 
+_FAKE_UUID = "00000000-0000-0000-0000-000000000001"
+
 
 class TestSwipeLike:
     def test_like_user(self, client, create_verified_user):
@@ -9,7 +11,7 @@ class TestSwipeLike:
         u2 = create_verified_user(name="Liked", email="liked@mcgill.ca")
         resp = client.post(
             f"/api/swipes/like?user_id={u1.id}",
-            json={"liked_user_id": u2.id, "is_like": True},
+            json={"liked_user_id": str(u2.id), "is_like": True},
             headers=auth_header(u1.id, u1.email),
         )
         assert resp.status_code == 200
@@ -20,7 +22,7 @@ class TestSwipeLike:
         u2 = create_verified_user(name="Passed", email="passed@mcgill.ca")
         resp = client.post(
             f"/api/swipes/like?user_id={u1.id}",
-            json={"liked_user_id": u2.id, "is_like": False},
+            json={"liked_user_id": str(u2.id), "is_like": False},
             headers=auth_header(u1.id, u1.email),
         )
         assert resp.status_code == 200
@@ -30,7 +32,7 @@ class TestSwipeLike:
         u = create_verified_user(email="self@mcgill.ca")
         resp = client.post(
             f"/api/swipes/like?user_id={u.id}",
-            json={"liked_user_id": u.id, "is_like": True},
+            json={"liked_user_id": str(u.id), "is_like": True},
             headers=auth_header(u.id, u.email),
         )
         assert resp.status_code == 400
@@ -39,7 +41,7 @@ class TestSwipeLike:
         u = create_verified_user(email="ghost@mcgill.ca")
         resp = client.post(
             f"/api/swipes/like?user_id={u.id}",
-            json={"liked_user_id": 9999, "is_like": True},
+            json={"liked_user_id": _FAKE_UUID, "is_like": True},
             headers=auth_header(u.id, u.email),
         )
         assert resp.status_code == 404
@@ -50,12 +52,12 @@ class TestSwipeLike:
         headers = auth_header(u1.id, u1.email)
         client.post(
             f"/api/swipes/like?user_id={u1.id}",
-            json={"liked_user_id": u2.id, "is_like": True},
+            json={"liked_user_id": str(u2.id), "is_like": True},
             headers=headers,
         )
         resp = client.post(
             f"/api/swipes/like?user_id={u1.id}",
-            json={"liked_user_id": u2.id, "is_like": True},
+            json={"liked_user_id": str(u2.id), "is_like": True},
             headers=headers,
         )
         assert resp.status_code == 400
@@ -63,16 +65,14 @@ class TestSwipeLike:
     def test_mutual_match(self, client, create_verified_user):
         u1 = create_verified_user(name="Mutual1", email="mutual1@mcgill.ca")
         u2 = create_verified_user(name="Mutual2", email="mutual2@mcgill.ca")
-        # u1 likes u2
         client.post(
             f"/api/swipes/like?user_id={u1.id}",
-            json={"liked_user_id": u2.id, "is_like": True},
+            json={"liked_user_id": str(u2.id), "is_like": True},
             headers=auth_header(u1.id, u1.email),
         )
-        # u2 likes u1 back
         resp = client.post(
             f"/api/swipes/like?user_id={u2.id}",
-            json={"liked_user_id": u1.id, "is_like": True},
+            json={"liked_user_id": str(u1.id), "is_like": True},
             headers=auth_header(u2.id, u2.email),
         )
         assert resp.status_code == 200
@@ -84,8 +84,8 @@ class TestSwipeLike:
         u3 = create_verified_user(name="Target", email="tgt@mcgill.ca")
         resp = client.post(
             f"/api/swipes/like?user_id={u2.id}",
-            json={"liked_user_id": u3.id, "is_like": True},
-            headers=auth_header(u1.id, u1.email),  # u1 pretending to be u2
+            json={"liked_user_id": str(u3.id), "is_like": True},
+            headers=auth_header(u1.id, u1.email),
         )
         assert resp.status_code == 403
 
@@ -94,7 +94,7 @@ class TestSwipeLike:
         u2 = create_verified_user(email="noauth6@mcgill.ca")
         resp = client.post(
             f"/api/swipes/like?user_id={u1.id}",
-            json={"liked_user_id": u2.id, "is_like": True},
+            json={"liked_user_id": str(u2.id), "is_like": True},
         )
         assert resp.status_code == 401
 
@@ -105,7 +105,7 @@ class TestCheckLike:
         u2 = create_verified_user(name="C2", email="c2@mcgill.ca")
         client.post(
             f"/api/swipes/like?user_id={u1.id}",
-            json={"liked_user_id": u2.id, "is_like": True},
+            json={"liked_user_id": str(u2.id), "is_like": True},
             headers=auth_header(u1.id, u1.email),
         )
         resp = client.get(

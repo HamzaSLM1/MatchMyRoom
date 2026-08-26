@@ -25,7 +25,7 @@ class TestCalculateMatches:
         assert resp.status_code == 400
 
     def test_calculate_unauthenticated(self, client):
-        resp = client.post("/api/matches/calculate?user_id=9999")
+        resp = client.post("/api/matches/calculate?user_id=00000000-0000-0000-0000-000000000001")
         assert resp.status_code == 401
 
     def test_calculate_for_another_user(self, client, create_user_with_questionnaire):

@@ -1,28 +1,31 @@
+import base64
 import os
 import sys
+import uuid
 import pytest
-from sqlalchemy import create_engine, event
+import jwt as pyjwt
+from datetime import datetime, timedelta, timezone
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from fastapi.testclient import TestClient
-from unittest.mock import patch
 
 # Ensure the backend package is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# Set required env vars before importing backend modules
-# These must be set before any backend imports since database.py and main.py
-# validate them at module level.
+# Set required env vars before importing backend modules.
+# SUPABASE_JWT_SECRET must be base64-encoded (the app calls base64.b64decode on it).
+_TEST_JWT_SECRET_BYTES = b"test-supabase-jwt-secret-for-unit-tests!!"
+_TEST_JWT_SECRET_B64 = base64.b64encode(_TEST_JWT_SECRET_BYTES).decode()
+
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
-os.environ.setdefault("JWT_SECRET", "test-secret-key-that-is-32-chars-long!!")
+os.environ.setdefault("SUPABASE_JWT_SECRET", _TEST_JWT_SECRET_B64)
 
 from backend.app.models import Base
 from backend.app.database import get_db
-from backend.app.main import app, create_token, pwd_context, limiter
+from backend.app.main import app, limiter
 
 # ── In-memory SQLite for tests ──
-# StaticPool ensures all sessions share the same connection, which is required
-# for SQLite in-memory databases (each connection gets its own database otherwise).
 TEST_DATABASE_URL = "sqlite:///:memory:"
 
 engine = create_engine(
@@ -76,16 +79,14 @@ def client(db_session):
 
 @pytest.fixture()
 def create_verified_user(db_session):
-    """Factory fixture: creates a verified user and returns the ORM object."""
+    """Factory fixture: creates a user and returns the ORM object."""
     from backend.app.models import User
 
-    def _create(name="Test User", email="test@mcgill.ca", password="password123"):
+    def _create(name="Test User", email="test@mcgill.ca"):
         user = User(
             name=name,
             email=email,
-            password_hash=pwd_context.hash(password),
             university="mcgill" if "mcgill" in email else "concordia",
-            email_verified=True,
             questionnaire_completed=False,
         )
         db_session.add(user)
@@ -98,13 +99,13 @@ def create_verified_user(db_session):
 
 @pytest.fixture()
 def create_user_with_questionnaire(db_session, create_verified_user):
-    """Factory fixture: creates a verified user with a completed questionnaire."""
+    """Factory fixture: creates a user with a completed questionnaire."""
     from backend.app.models import QuestionnaireResponse
 
-    def _create(name="Test User", email="test@mcgill.ca", password="password123", responses=None):
+    def _create(name="Test User", email="test@mcgill.ca", responses=None):
         if responses is None:
             responses = sample_questionnaire_responses()
-        user = create_verified_user(name=name, email=email, password=password)
+        user = create_verified_user(name=name, email=email)
         user.questionnaire_completed = True
         q = QuestionnaireResponse(user_id=user.id, responses=responses)
         db_session.add(q)
@@ -115,9 +116,18 @@ def create_user_with_questionnaire(db_session, create_verified_user):
     return _create
 
 
-def auth_header(user_id: int, email: str) -> dict:
-    """Return an Authorization header dict with a valid JWT for the given user."""
-    token = create_token(user_id, email)
+def auth_header(user_id, email: str) -> dict:
+    """Return an Authorization header dict with a valid Supabase-style JWT for the given user."""
+    token = pyjwt.encode(
+        {
+            "sub": str(user_id),
+            "email": email,
+            "aud": "authenticated",
+            "exp": datetime.now(timezone.utc) + timedelta(hours=1),
+        },
+        _TEST_JWT_SECRET_BYTES,
+        algorithm="HS256",
+    )
     return {"Authorization": f"Bearer {token}"}
 
 
