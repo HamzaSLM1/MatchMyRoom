@@ -1070,10 +1070,11 @@ def mark_message_read(
 async def websocket_endpoint(websocket: WebSocket, user_id: str, token: str = Query(...)):
     """WebSocket endpoint for real-time messaging. Authenticate via token query param."""
     try:
-        supabase_secret = os.getenv("SUPABASE_JWT_SECRET")
-        payload = jwt.decode(token, supabase_secret, algorithms=["HS256"], options={"verify_aud": False})
+        import uuid as _uuid
+        payload = _decode_supabase_token(token)
         token_user_id = payload.get("sub")
-        if token_user_id != user_id:
+        # Compare as UUIDs so formatting differences don't read as a mismatch.
+        if _uuid.UUID(str(token_user_id)) != _uuid.UUID(str(user_id)):
             await websocket.close(code=4003, reason="User ID mismatch")
             return
     except Exception:
