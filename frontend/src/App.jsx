@@ -544,7 +544,7 @@ function AuthPage({ mode, setPage, setPendingEmail, onAuth }) {
   );
 }
 
-function VerificationPage({ email, setPage }) {
+function VerificationPage({ email, setPage, onAuth }) {
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -561,15 +561,39 @@ function VerificationPage({ email, setPage }) {
         token: code,
         type: 'signup'
       });
-      
+
       if (verifyError) {
         setError(verifyError.message);
         setLoading(false);
         return;
       }
 
-      setSuccess(true);
-      setTimeout(() => setPage("login"), 2000);
+      if (data.session) {
+        setSuccess(true);
+        const name = data.user?.user_metadata?.name || "User";
+        const syncRes = await fetch(`${API_BASE}/auth/sync-user?name=${encodeURIComponent(name)}`, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${data.session.access_token}` }
+        });
+        if (!syncRes.ok) {
+          setError("Account verified but sync failed. Please log in.");
+          setTimeout(() => setPage("login"), 2000);
+          return;
+        }
+        const syncData = await syncRes.json();
+        applyTheme(syncData.university);
+        onAuth({
+          user_id: syncData.user_id,
+          email: syncData.email,
+          name: syncData.name,
+          university: syncData.university,
+          questionnaire_completed: syncData.questionnaire_completed,
+          token: data.session.access_token
+        });
+      } else {
+        setSuccess(true);
+        setTimeout(() => setPage("login"), 2000);
+      }
     } catch (err) {
       setError("Network error. Please try again.");
       setLoading(false);
@@ -1829,7 +1853,7 @@ export default function App() {
       {page === "tos" && <TermsOfServicePage setPage={setPage} />}
       {page === "signup" && <AuthPage mode="signup" setPage={setPage} setPendingEmail={setPendingEmail} setDevCode={setDevCode} onAuth={handleAuth} />}
       {page === "login" && <AuthPage mode="login" setPage={setPage} setPendingEmail={setPendingEmail} setDevCode={setDevCode} onAuth={handleAuth} />}
-      {page === "verify" && <VerificationPage email={pendingEmail} setPage={setPage} devCode={devCode} setDevCode={setDevCode} />}
+      {page === "verify" && <VerificationPage email={pendingEmail} setPage={setPage} onAuth={handleAuth} />}
       {page === "questionnaire" && <QuestionnairePage setPage={setPage} onComplete={handleQuestionnaireComplete} user={user} token={token} />}
       {page === "dashboard" && <DashboardPage user={user} setPage={setPage} setSelectedMatch={setSelectedMatch} token={token} />}
       {page === "profile" && <ProfileEditPage user={user} setPage={setPage} onProfileUpdate={handleProfileUpdate} token={token} />}
