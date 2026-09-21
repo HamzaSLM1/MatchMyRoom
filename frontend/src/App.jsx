@@ -87,6 +87,11 @@ const globalStyles = `
   @import url('${FONTS_LINK}');
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: ${C.bg}; color: ${C.text}; font-family: ${font.body}; overflow-x: hidden; }
+
+  /* Landing shell: exactly one viewport tall, so the hero + footer never
+     overflow into a dead scroll. dvh keeps this honest on mobile, where
+     100vh is the *large* viewport and is taller than what's actually visible. */
+  .landing-shell { min-height: 100vh; min-height: 100dvh; }
   ::selection { background: ${C.accent}; color: white; }
   input:focus, textarea:focus { outline: none; }
 
@@ -300,8 +305,8 @@ function NavBar({ page, setPage, isLoggedIn, user, unreadCount = 0 }) {
 
 function LandingPage({ setPage }) {
   return (
-    <div style={{ minHeight: "100vh", paddingTop: 80 }}>
-      <section style={{ minHeight: "90vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center", padding: "60px 24px", position: "relative", overflow: "hidden" }}>
+    <div className="landing-shell" style={{ paddingTop: 80, display: "flex", flexDirection: "column" }}>
+      <section style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center", padding: "60px 24px", position: "relative", overflow: "hidden" }}>
         {/* Animated background gradients */}
         <div style={{ position: "absolute", top: "-20%", left: "50%", transform: "translateX(-50%)", width: 800, height: 800, borderRadius: "50%", background: `radial-gradient(circle, ${C.accentGlow} 0%, transparent 70%)`, pointerEvents: "none", animation: "glow 4s ease-in-out infinite" }} />
         <div className="anim-float" style={{ position: "absolute", top: "15%", right: "10%", width: 120, height: 120, borderRadius: "50%", background: `radial-gradient(circle, ${C.mcgillRedDark}40, transparent)`, pointerEvents: "none", animationDelay: "0.5s" }} />
@@ -323,7 +328,7 @@ function LandingPage({ setPage }) {
           <button className="btn-secondary" style={{ padding: "16px 40px", fontSize: 16 }} onClick={() => setPage("login")}>I have an account</button>
         </div>
       </section>
-      <footer style={{ padding: "32px 24px", borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", maxWidth: 1000, margin: "0 auto", fontSize: 13, color: C.textDim }}>
+      <footer style={{ flexShrink: 0, padding: "32px 24px", borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", maxWidth: 1000, margin: "0 auto", fontSize: 13, color: C.textDim }}>
         <Logo size={20} />
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
           <span style={{ color: C.accent, cursor: "pointer", textDecoration: "underline" }} onClick={() => setPage("tos")}>Terms of Service</span>
