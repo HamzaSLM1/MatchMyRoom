@@ -91,7 +91,20 @@ ws_manager = ConnectionManager()
 
 
 # ─── JWT Helpers ───
-# ─── JWT Helpers ───
+import os
+import jwt
+
+from jwt import PyJWKClient as _PyJWKClient
+_jwks_client = _PyJWKClient("https://jrdklvbjuavglhmdvmrd.supabase.co/auth/v1/.well-known/jwks.json")
+
+def _decode_supabase_token(token: str) -> dict:
+    try:
+        signing_key = _jwks_client.get_signing_key_from_jwt(token)
+        return jwt.decode(token, signing_key.key, algorithms=["ES256"], options={"verify_aud": False})
+    except Exception as e:
+        print(f"TOKEN DECODE ERROR: {type(e).__name__}: {e}")
+        raise
+
 def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: Session = Depends(get_db)
@@ -101,19 +114,14 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     try:
-        supabase_secret = os.getenv("SUPABASE_JWT_SECRET")
-        if not supabase_secret:
-            raise HTTPException(status_code=500, detail="SUPABASE_JWT_SECRET not configured")
-            
-        payload = jwt.decode(
-            credentials.credentials, 
-            supabase_secret, 
-            algorithms=["HS256"],
-            options={"verify_aud": False}
-        )
-        user_id = payload.get("sub")
-        if user_id is None:
+        import uuid as _uuid
+        payload = _decode_supabase_token(credentials.credentials)
+        user_id_str = payload.get("sub")
+        if user_id_str is None:
             raise HTTPException(status_code=401, detail="Invalid token")
+        user_id = _uuid.UUID(user_id_str)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
 
@@ -1349,19 +1357,13 @@ def sync_user(
     if not credentials:
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
-        supabase_secret = os.getenv("SUPABASE_JWT_SECRET")
-        if not supabase_secret:
-            raise HTTPException(status_code=500, detail="SUPABASE_JWT_SECRET not configured")
-        payload = jwt.decode(
-            credentials.credentials,
-            supabase_secret,
-            algorithms=["HS256"],
-            options={"verify_aud": False}
-        )
-        user_id = payload.get("sub")
+        import uuid as _uuid
+        payload = _decode_supabase_token(credentials.credentials)
+        user_id_str = payload.get("sub")
         user_email = payload.get("email")
-        if not user_id or not user_email:
+        if not user_id_str or not user_email:
             raise HTTPException(status_code=401, detail="Invalid token")
+        user_id = _uuid.UUID(user_id_str)
     except HTTPException:
         raise
     except Exception as e:

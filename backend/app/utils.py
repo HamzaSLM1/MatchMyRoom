@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from .models import Block
 
 
-def get_blocked_user_ids(user_id: int, db: Session) -> set:
+def get_blocked_user_ids(user_id: str, db: Session) -> set:
     """Returns all user IDs that user_id has blocked OR that have blocked user_id.
 
     This is bidirectional: if A blocked B or B blocked A, both IDs are excluded
