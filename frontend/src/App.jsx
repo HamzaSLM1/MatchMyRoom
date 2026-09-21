@@ -410,10 +410,21 @@ function AuthPage({ mode, setPage, setPendingEmail, onAuth }) {
 
   const handleSubmit = async () => {
     setError("");
+    const cleanEmail = email.trim().toLowerCase();
     if (isSignup && !name.trim()) return setError("Name is required");
-    if (!email.includes("@")) return setError("Enter a valid email");
-    if (isSignup && !(email.endsWith("@mcgill.ca") || email.endsWith("@mail.mcgill.ca") || email.endsWith("@concordia.ca") || email.endsWith("@live.concordia.ca"))) {
-      return setError("Only McGill or Concordia emails are allowed");
+    if (!cleanEmail.includes("@")) return setError("Enter a valid email");
+    
+    const allowedDomains = [
+      "@mcgill.ca",
+      "@mail.mcgill.ca",
+      "@alumni.mcgill.ca",
+      "@concordia.ca",
+      "@live.concordia.ca",
+      "@mail.concordia.ca"
+    ];
+    const isUniversityEmail = allowedDomains.some(d => cleanEmail.endsWith(d));
+    if (isSignup && !isUniversityEmail) {
+      return setError("Only McGill or Concordia emails are allowed (@mail.mcgill.ca, @mcgill.ca, @live.concordia.ca, @mail.concordia.ca, @concordia.ca)");
     }
     if (password.length < 8) return setError("Password must be at least 8 characters");
     if (isSignup && !tosAccepted) return setError("You must accept the Terms of Service to create an account");
@@ -422,10 +433,10 @@ function AuthPage({ mode, setPage, setPendingEmail, onAuth }) {
     try {
       if (isSignup) {
         const { data, error: signUpError } = await supabase.auth.signUp({
-          email,
+          email: cleanEmail,
           password,
           options: {
-            data: { name }
+            data: { name: name.trim() }
           }
         });
         if (signUpError) {

@@ -197,21 +197,24 @@ def startup_event():
 # ─── Helper Functions ───
 def get_university_from_email(email: str) -> str:
     """Determine university from email domain"""
-    email_lower = email.lower()
-    if "@concordia.ca" in email_lower or "@live.concordia.ca" in email_lower:
+    email_lower = (email or "").strip().lower()
+    if any(email_lower.endswith(domain) for domain in ["@concordia.ca", "@live.concordia.ca", "@mail.concordia.ca"]):
         return "concordia"
     return "mcgill"
 
 
 def validate_university_email(email: str) -> bool:
     """Check if email is from McGill or Concordia"""
-    email_lower = email.lower()
-    return (
-        email_lower.endswith("@mcgill.ca") or
-        email_lower.endswith("@mail.mcgill.ca") or
-        email_lower.endswith("@concordia.ca") or
-        email_lower.endswith("@live.concordia.ca")
+    email_lower = (email or "").strip().lower()
+    valid_domains = (
+        "@mcgill.ca",
+        "@mail.mcgill.ca",
+        "@alumni.mcgill.ca",
+        "@concordia.ca",
+        "@live.concordia.ca",
+        "@mail.concordia.ca",
     )
+    return any(email_lower.endswith(domain) for domain in valid_domains)
 
 
 # ─── Profile Endpoints (Authenticated) ───
@@ -1371,6 +1374,11 @@ def sync_user(
 
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
+        if not validate_university_email(user_email):
+            raise HTTPException(
+                status_code=403,
+                detail="Access restricted: Only verified McGill and Concordia student emails are allowed."
+            )
         university = get_university_from_email(user_email)
         user = User(
             id=user_id,
