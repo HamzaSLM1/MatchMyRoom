@@ -31,7 +31,14 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 def init_db():
-    """Run Alembic migrations to head on startup, with fallback to create_all."""
+    """Build the schema on startup: Alembic for postgres, create_all otherwise."""
+    # The migration chain is postgres-only (it uses TRUNCATE ... CASCADE), so for
+    # SQLite - local dev and the test suite - build straight from the models.
+    if not DATABASE_URL.startswith("postgresql"):
+        Base.metadata.create_all(bind=engine)
+        print("✅ Non-postgres database: tables created via create_all")
+        return
+
     try:
         from alembic.config import Config
         from alembic import command
