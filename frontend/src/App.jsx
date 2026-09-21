@@ -444,9 +444,18 @@ function AuthPage({ mode, setPage, setPendingEmail, onAuth }) {
           setLoading(false);
           return;
         }
+        // Supabase hides whether an email is already registered: for an existing
+        // confirmed account it returns 200 with a decoy user (identities: []) and
+        // sends no email. Without this check we'd send the user to the verify page
+        // to wait for a code that was never generated.
+        if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+          setError("That email is already registered. Please log in instead.");
+          setLoading(false);
+          return;
+        }
         if (data.session) {
           // Email confirmation is off — user is logged in immediately
-          const syncRes = await fetch(`${API_BASE}/auth/sync-user?name=${encodeURIComponent(name)}`, {
+          const syncRes = await fetch(`${API_BASE}/auth/sync-user?name=${encodeURIComponent(name.trim())}`, {
             method: "POST",
             headers: { "Authorization": `Bearer ${data.session.access_token}` }
           });
@@ -462,15 +471,23 @@ function AuthPage({ mode, setPage, setPendingEmail, onAuth }) {
             token: data.session.access_token
           });
         } else {
-          setPendingEmail(email);
+          setPendingEmail(cleanEmail);
           setPage("verify");
         }
       } else {
         const { data, error: signInError } = await supabase.auth.signInWithPassword({
-          email,
+          email: cleanEmail,
           password
         });
         if (signInError) {
+          // An account that was created but never verified can't log in. Send them
+          // to the verify page (which can resend a code) instead of a dead end.
+          if (/email not confirmed/i.test(signInError.message)) {
+            setPendingEmail(cleanEmail);
+            setPage("verify");
+            setLoading(false);
+            return;
+          }
           setError(signInError.message);
           setLoading(false);
           return;
