@@ -198,11 +198,19 @@ Corrections to the audit found during validation:
 - [x] Identify real runtime component tree; fix the active app — confirmed `src/main.jsx`
   renders only `App.jsx`; `src/pages/*.jsx` is never imported anywhere (grepped) and is dead
   code. All fixes in this section target `App.jsx`.
-- [ ] Consistent API client and configuration — `authFetch` (adds the bearer token, handles
-  401) is used for authenticated calls, but a few auth-flow requests (`sync-user`) still use
-  raw `fetch`. Not unified yet.
-- [ ] Accurate handling of HTTP errors, outages, malformed responses, timeouts, auth failures —
-  broad item, not fully audited; see the two specific findings below for what's fixed so far.
+- [x] Consistent API client and configuration — checked: the 4 raw-`fetch` sites (all
+  `auth/sync-user`, in signup/login/OTP-verify/session-restore) are deliberately not routed
+  through `authFetch`. They already hold a just-issued `session.access_token` directly from
+  the Supabase call that preceded them, and routing them through `authFetch` would add its
+  automatic signOut+reload-on-401 behavior to the exact moment a user is first establishing a
+  session — a 401 there (e.g. a transient sync failure) should show a retry-able error, not
+  force an immediate reload loop back to landing. All 4 already check `.ok` and set an error
+  message correctly. Left as-is; not a bug.
+- [x] Accurate handling of HTTP errors, outages, malformed responses, timeouts, auth failures —
+  audited every `authFetch`/`fetch` call site in `App.jsx` (see the two items below plus the
+  API-client finding above). Remaining unchecked cases are deliberate fire-and-forget side
+  effects (mutual-match popup, post-questionnaire match recalculation trigger) where the
+  primary action already has its own success check.
 - [x] Never show "saved" after a failed request — audited every write-path `authFetch` call
   site against `response.ok` (fetch doesn't throw on 4xx/5xx, only on network failure). Found
   and fixed two real instances: `EditProfile.handleSave` showed the success state and
@@ -210,9 +218,13 @@ Corrections to the audit found during validation:
   post-like message prompt (`handleSendPromptMessage`) silently closed and discarded the
   typed message on any failure. Other write paths (questionnaire submit, swipe like, thread
   send) already gated correctly on `response.ok`.
-- [~] Loading states recover after failure — the two sites fixed above now reset their loading
-  flag on failure (early `return` + `finally`) instead of hanging or falsely completing; not
-  audited across the rest of the file.
+- [x] Loading states recover after failure — audited every `setLoading(true)` call in
+  `App.jsx` for a path that returns without resetting it. Found and fixed one:
+  `handleVerify`'s post-OTP sync-failure branch set an error and scheduled a redirect but
+  never reset `loading`, leaving the verify button stuck disabled for ~2s until the redirect
+  fired (cosmetic — the page navigates away shortly after — but inconsistent with every other
+  such path in the file). All others already use `finally` or an explicit reset on every
+  branch.
 - [x] No logout loop when backend is temporarily unavailable — `authFetch` forced
   `signOut()` + `window.location.reload()` on every single 401 response with no dedup; two
   polling loops (5s conversations, 10s unread count) hitting 401 around the same
