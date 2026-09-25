@@ -85,6 +85,47 @@ class TestGetConversations:
         assert len(data) == 1
         assert data[0]["user_id"] == str(u2.id)
 
+    def test_get_conversations_multiple_partners_ordering_and_unread(
+        self, client, create_verified_user
+    ):
+        u1 = create_verified_user(name="Hub", email="hub@mcgill.ca")
+        u2 = create_verified_user(name="PartnerA", email="partnera@mcgill.ca")
+        u3 = create_verified_user(name="PartnerB", email="partnerb@mcgill.ca")
+
+        # Two messages with u2 (u1 sent then received), one unread from u2
+        client.post(
+            f"/api/messages/send?sender_id={u1.id}",
+            json={"recipient_id": str(u2.id), "content": "Hi A"},
+            headers=auth_header(u1.id, u1.email),
+        )
+        client.post(
+            f"/api/messages/send?sender_id={u2.id}",
+            json={"recipient_id": str(u1.id), "content": "Reply from A"},
+            headers=auth_header(u2.id, u2.email),
+        )
+        # One message with u3, sent after the u2 exchange, also unread
+        client.post(
+            f"/api/messages/send?sender_id={u3.id}",
+            json={"recipient_id": str(u1.id), "content": "Hi from B"},
+            headers=auth_header(u3.id, u3.email),
+        )
+
+        resp = client.get(
+            f"/api/messages/conversations/{u1.id}",
+            headers=auth_header(u1.id, u1.email),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 2
+        # Most recent conversation (u3) first
+        assert data[0]["user_id"] == str(u3.id)
+        assert data[0]["last_message"] == "Hi from B"
+        assert data[0]["unread_count"] == 1
+        # u2's conversation shows its latest message, one unread from u2
+        assert data[1]["user_id"] == str(u2.id)
+        assert data[1]["last_message"] == "Reply from A"
+        assert data[1]["unread_count"] == 1
+
     def test_get_conversations_other_user(self, client, create_verified_user):
         u1 = create_verified_user(name="NoConv1", email="noconv1@mcgill.ca")
         u2 = create_verified_user(name="NoConv2", email="noconv2@mcgill.ca")

@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Request, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import text
+from sqlalchemy import text, case, func
 from typing import List, Optional
 import os
 import secrets
@@ -952,45 +952,56 @@ def get_conversations(
     # hidden here at the API layer. If the block is later removed, threads reappear.
     blocked_ids = get_blocked_user_ids(user_id, db)
 
-    # Single query: fetch all messages in the user's conversations (replaces N+1 queries)
-    all_messages = db.query(Message).filter(
+    # Per-partner aggregation in SQL (bounded by conversation count, not message
+    # count): a window function picks each partner's most recent message, and a
+    # separate GROUP BY counts unread messages per sender. Replaces loading every
+    # message the user has ever sent or received into Python.
+    partner_id_expr = case(
+        (Message.sender_id == user_id, Message.recipient_id),
+        else_=Message.sender_id
+    )
+    ranked = db.query(
+        Message.id,
+        Message.content,
+        Message.sent_at,
+        partner_id_expr.label("partner_id"),
+        func.row_number().over(
+            partition_by=partner_id_expr,
+            order_by=Message.sent_at.desc()
+        ).label("rn")
+    ).filter(
         (Message.sender_id == user_id) | (Message.recipient_id == user_id)
-    ).order_by(Message.sent_at.desc()).all()
+    ).subquery()
 
-    # Build last_message and unread_count maps in Python from the single result set
-    last_message_map = {}
-    unread_count_map = {}
-    for msg in all_messages:
-        is_sender = str(msg.sender_id) == user_id
-        partner = msg.recipient_id if is_sender else msg.sender_id
-        if partner not in last_message_map:
-            last_message_map[partner] = msg  # desc-ordered, so first seen is latest
-        if not is_sender and not msg.read:
-            unread_count_map[partner] = unread_count_map.get(partner, 0) + 1
+    last_messages = db.query(ranked).filter(ranked.c.rn == 1).all()
 
-    other_user_ids = set(last_message_map.keys())
-    # Filter out blocked users from the conversation list
-    other_user_ids = other_user_ids - blocked_ids
+    unread_counts = dict(
+        db.query(Message.sender_id, func.count(Message.id))
+        .filter(Message.recipient_id == user_id, Message.read.is_(False))
+        .group_by(Message.sender_id)
+        .all()
+    )
+
+    other_user_ids = {row.partner_id for row in last_messages} - blocked_ids
 
     # Batch load users
     other_users = db.query(User).filter(User.id.in_(other_user_ids)).all() if other_user_ids else []
     users_map = {u.id: u for u in other_users}
 
     conversations = []
-    for other_user_id in other_user_ids:
-        other_user = users_map.get(other_user_id)
+    for row in last_messages:
+        other_user = users_map.get(row.partner_id)
         if not other_user:
             continue
 
-        last_message = last_message_map[other_user_id]
-        unread_count = unread_count_map.get(other_user_id, 0)
+        unread_count = unread_counts.get(row.partner_id, 0)
 
         conversations.append(ConversationPreview(
             user_id=str(other_user.id),
             name=other_user.name,
             profile_pic_url=other_user.profile_pic_url,
-            last_message=last_message.content[:50] + "..." if len(last_message.content) > 50 else last_message.content,
-            last_message_time=last_message.sent_at,
+            last_message=row.content[:50] + "..." if len(row.content) > 50 else row.content,
+            last_message_time=row.sent_at,
             unread_count=unread_count
         ))
 
