@@ -356,13 +356,14 @@ def _recalculate_matches_for_user(user_id: str, db: Session) -> None:
     if not user_questionnaire:
         return
 
-    # Cap at 500 to prevent OOM on large datasets (mirrors calculate_matches endpoint)
+    # Cap at 500 to prevent OOM on large datasets (mirrors calculate_matches endpoint).
+    # Ordered by id for the same determinism reason — see that endpoint's comment.
     other_users = db.query(User).options(
         joinedload(User.questionnaire)
     ).filter(
         User.id != user_id,
         User.questionnaire_completed == True
-    ).limit(500).all()
+    ).order_by(User.id).limit(500).all()
 
     for other_user in other_users:
         if not other_user.questionnaire:
@@ -468,13 +469,19 @@ def calculate_matches(
         raise HTTPException(status_code=400, detail="Please complete the questionnaire first")
 
     # Get other users with completed questionnaires (eager load questionnaires)
-    # Capped at 500 to prevent OOM on large datasets
+    # Capped at 500 to prevent OOM on large datasets. Ordered by id so the cap is
+    # deterministic — an unordered LIMIT lets the DB return a different arbitrary
+    # subset on each call, which would make matches flicker in and out for users
+    # near the boundary once the eligible pool exceeds 500. This does not remove
+    # the scale limitation itself: past 500 eligible users, some pairs will never
+    # be scored against each other. A real fix needs batched/paginated processing
+    # of the full candidate pool, which needs a reachable DB to verify (B1).
     other_users = db.query(User).options(
         joinedload(User.questionnaire)
     ).filter(
         User.id != user_id,
         User.questionnaire_completed == True
-    ).limit(500).all()
+    ).order_by(User.id).limit(500).all()
 
     # Calculate compatibility scores
     matches_created = 0
