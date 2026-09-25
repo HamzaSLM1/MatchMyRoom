@@ -394,10 +394,25 @@ Corrections to the audit found during validation:
   `User(password_hash=...)`, a column the model no longer has — it would crash if run, and
   is fully superseded by the working `/api/dev/create-fake-users` endpoint in `main.py`.
   Deleted the dead script and removed the two unused dependencies (kept `cryptography`,
-  which `PyJWT` needs for ES256). Did not run a full CVE/advisory scan (`pip-audit`/`npm
-  audit`) — no network/tooling check performed this session; flagging as still open.
+  which `PyJWT` needs for ES256).
+  **Ran the scan this session.** `pip-audit -r backend/requirements.txt`: 26 known
+  vulnerabilities across 8 packages. Bumped the 3 directly-pinned ones with same-major fixes
+  on PyPI — `python-multipart` 0.0.6→0.0.20, `python-dotenv` 1.0.0→1.2.1, `PyJWT`
+  2.11.0→2.15.0. The rest (`starlette`, `anyio`, `click`, `urllib3`, `requests`) are
+  transitive via fastapi/uvicorn/anthropic/resend/cloudinary and already unpinned; their
+  advisory fix versions fall outside fastapi's compatible range (e.g. starlette needs >=1.0,
+  fastapi 0.128 pins `<0.51.0`), so patching them means a fastapi major upgrade — see below,
+  not done blind. `npm audit` (frontend): 17 vulnerabilities (13 high). `npm audit fix`
+  (non-breaking) resolved 15 — nanoid, postcss, rollup, ws, react-router/react-router-dom,
+  lockfile-only, no package.json changes. Remaining 2 are both esbuild's dev-server CORS
+  issue (GHSA-67mh-4wv8-2f99, only affects `vite dev`, not the production build) and need a
+  Vite 5→8 major to fix.
 - [ ] Runtime exposure triaged separately from dev tooling
-- [ ] Compatible upgrades applied (no blind majors)
+- [B] Compatible upgrades applied (no blind majors) — two majors identified as needed for full
+  remediation, left for the owner to schedule and review rather than done unreviewed:
+  **fastapi** (to unblock starlette/anyio patches) and **Vite** 5→8 (to fix the esbuild
+  dev-server CORS advisory). Both are dev/build-tooling or framework-level changes that
+  deserve their own review pass, not a drive-by bump inside a dependency-audit task.
 - [ ] Lint and config inconsistencies resolved
 - [ ] Necessity review of religion and dietary/allergy collection
 - [ ] Privacy controls and truthful disclosures
@@ -416,3 +431,4 @@ Corrections to the audit found during validation:
 | B4 | ~~Eligibility policy (alumni/staff vs enrolled students)~~ | **Resolved 2026-09-21**: current students only. Alumni domain removed from backend + frontend + Supabase trigger (needs re-deploy of the SQL, B2). |
 | B5 | ~~Contact policy (mutual match required to message?)~~ | **Resolved 2026-09-21**: keep open messaging (block-list only), no code change needed. |
 | B6 | Privacy/legal review for Quebec obligations | Qualified advice |
+| B7 | Two dependency CVEs need a major-version upgrade to fully close: fastapi (unblocks starlette/anyio patches) and Vite 5→8 (fixes an esbuild dev-server-only CORS advisory) | Owner review/scheduling — not done as a drive-by bump |
