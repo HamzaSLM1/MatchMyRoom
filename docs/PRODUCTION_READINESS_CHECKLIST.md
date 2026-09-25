@@ -294,7 +294,16 @@ Corrections to the audit found during validation:
 - [ ] Questions align with supported behaviour
 - [ ] Hard constraints separated from weighted preferences
 - [ ] Stale matches recalculated/removed on retake
-- [ ] Deterministic bounded candidate selection (replace arbitrary 500 cap)
+- [~] Deterministic bounded candidate selection (replace arbitrary 500 cap) — both
+  `calculate_matches` and `_recalculate_matches_for_user` used `.limit(500)` with no
+  `ORDER BY`; an unordered LIMIT lets the DB return a different arbitrary subset per call, so
+  matches for users near the boundary could flicker once the eligible pool passed 500. Added
+  `order_by(User.id)` to both so the same 500 candidates are picked every time. Verified
+  locally (149 passed, 3 skipped) — SQLite/Postgres both apply LIMIT after ORDER BY, so this
+  is dialect-independent. Not marked `[x]`: this only makes the existing 500-cap
+  deterministic, it doesn't remove the scale limit itself — past 500 eligible users some
+  pairs will still never be scored against each other. A real fix needs batched/paginated
+  candidate processing, which needs a reachable DB to verify at scale (B1).
 - [ ] Tests use real frontend values
 
 ## 8. Data access and production configuration
