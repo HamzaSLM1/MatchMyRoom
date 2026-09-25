@@ -417,7 +417,6 @@ function AuthPage({ mode, setPage, setPendingEmail, onAuth }) {
     const allowedDomains = [
       "@mcgill.ca",
       "@mail.mcgill.ca",
-      "@alumni.mcgill.ca",
       "@concordia.ca",
       "@live.concordia.ca",
       "@mail.concordia.ca"

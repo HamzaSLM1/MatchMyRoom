@@ -4,18 +4,26 @@
 -- Create the function
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS trigger AS $$
+DECLARE
+  is_mcgill boolean;
+  is_concordia boolean;
 BEGIN
+  is_mcgill := lower(NEW.email) LIKE '%@mcgill.ca' OR lower(NEW.email) LIKE '%@mail.mcgill.ca';
+  is_concordia := lower(NEW.email) LIKE '%@concordia.ca'
+    OR lower(NEW.email) LIKE '%@live.concordia.ca'
+    OR lower(NEW.email) LIKE '%@mail.concordia.ca';
+
+  -- Unrelated domains must not be silently classified as McGill.
+  IF NOT (is_mcgill OR is_concordia) THEN
+    RAISE EXCEPTION 'Only McGill and Concordia student emails are allowed';
+  END IF;
+
   INSERT INTO public.users (id, email, name, university, created_at, questionnaire_completed)
   VALUES (
     NEW.id,
     NEW.email,
     COALESCE(NEW.raw_user_meta_data->>'name', 'Unknown User'),
-    CASE 
-      WHEN lower(NEW.email) LIKE '%@concordia.ca'
-        OR lower(NEW.email) LIKE '%@live.concordia.ca'
-        OR lower(NEW.email) LIKE '%@mail.concordia.ca' THEN 'concordia'
-      ELSE 'mcgill'
-    END,
+    CASE WHEN is_concordia THEN 'concordia' ELSE 'mcgill' END,
     NOW(),
     false
   );
