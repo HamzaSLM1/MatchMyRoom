@@ -313,16 +313,15 @@ Corrections to the audit found during validation:
   in-process rate-limit counters both break with >1 replica/worker), not something to fix in
   code. Documenting: whoever configures Railway must run exactly 1 replica / 1 uvicorn worker
   until these are moved to shared state (e.g. Redis).
-- [ ] Bounded messaging queries and pagination — **found, not yet fixed**:
-  `get_conversations` (`main.py` ~line 952) loads *every* message a user has ever sent or
-  received, unbounded, to build the conversation-preview list in Python. `get_message_thread`
-  is already properly paginated (`skip`/`limit`, capped at 200). A naive `.limit(N)` on the
-  conversations query would silently drop entire older conversation threads from the list
-  (not just truncate message history), which is a behavior regression, not a safe bound — the
-  correct fix is a per-partner SQL aggregation (last message + unread count per conversation
-  partner), which needs care and Postgres verification I can't do without a reachable DB
-  (B1). Left unfixed rather than rushing a fix I can't verify; flagging for the owner /
-  next session.
+- [x] Bounded messaging queries and pagination — `get_conversations` loaded *every* message
+  a user had ever sent or received, unbounded, to build the conversation-preview list in
+  Python. Replaced with two SQL aggregations: a `ROW_NUMBER() OVER (PARTITION BY partner
+  ORDER BY sent_at DESC)` window function picks each partner's latest message, and a
+  `GROUP BY` counts unread messages per sender — cost is now bounded by conversation-partner
+  count, not total message count. `get_message_thread` was already properly paginated
+  (`skip`/`limit`, capped at 200). Verified locally with a new multi-partner test (ordering +
+  per-partner unread counts); window functions are standard SQL with no dialect-specific
+  syntax, but not yet verified against a real Postgres instance (B1).
 - [A] Rate limiting correct for topology + trusted proxies — `slowapi`'s
   `get_remote_address` key func only reads `request.client.host` (verified by reading its
   source), which is the direct TCP peer. Behind Railway's edge proxy that's Railway's proxy,
