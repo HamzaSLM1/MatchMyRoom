@@ -12,7 +12,7 @@ class ProfileUpdateRequest(BaseModel):
 class UserProfile(BaseModel):
     id: str
     name: str
-    email: str
+    email: Optional[str] = None  # only populated when viewing your own profile
     university: Optional[str] = None
     program: Optional[str] = None
     bio: Optional[str] = None

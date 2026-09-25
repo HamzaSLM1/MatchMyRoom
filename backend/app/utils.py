@@ -14,4 +14,4 @@ def get_blocked_user_ids(user_id: str, db: Session) -> set:
     blocks = db.query(Block).filter(
         (Block.blocker_id == user_id) | (Block.blocked_id == user_id)
     ).all()
-    return {b.blocked_id if b.blocker_id == user_id else b.blocker_id for b in blocks}
+    return {b.blocked_id if str(b.blocker_id) == user_id else b.blocker_id for b in blocks}

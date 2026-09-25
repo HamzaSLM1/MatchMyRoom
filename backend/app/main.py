@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Request, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import text
 from typing import List, Optional
 import os
 import secrets
@@ -24,7 +25,7 @@ from .schemas import (
     SwipeRequest, SwipeResponse, SwipeHistoryItem, SendInitialMessageRequest,
     BlockRequest, ReportRequest
 )
-from .matching import calculate_compatibility, calculate_compatibility_breakdown, get_question_text
+from .matching import calculate_compatibility, calculate_compatibility_breakdown, get_question_text, QUESTION_LABELS
 from .cloudinary_config import init_cloudinary, upload_profile_picture, delete_profile_picture
 from .email_service import send_new_matches_notification, send_like_notification, send_mutual_match_notification
 from .utils import get_blocked_user_ids
@@ -33,10 +34,11 @@ from .utils import get_blocked_user_ids
 load_dotenv()
 
 # ─── Configuration ───
-ALLOWED_ORIGINS = os.getenv(
-    "ALLOWED_ORIGINS",
-    "http://localhost:5173"
-).split(",")
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+    if origin.strip()
+]
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
@@ -56,7 +58,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -95,7 +97,14 @@ import os
 import jwt
 
 from jwt import PyJWKClient as _PyJWKClient
-_jwks_client = _PyJWKClient("https://jrdklvbjuavglhmdvmrd.supabase.co/auth/v1/.well-known/jwks.json")
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+if not SUPABASE_URL:
+    raise RuntimeError(
+        "SUPABASE_URL environment variable is required. "
+        "Set it to your Supabase project URL, e.g. https://<project-ref>.supabase.co"
+    )
+_jwks_client = _PyJWKClient(f"{SUPABASE_URL.rstrip('/')}/auth/v1/.well-known/jwks.json")
 
 def _decode_supabase_token(token: str) -> dict:
     try:
@@ -148,44 +157,14 @@ def get_optional_user(
 # ─── Startup Event ───
 @app.on_event("startup")
 def startup_event():
-    """Initialize database and Cloudinary on startup"""
-    try:
-        init_db()
-        print("✅ Database initialized")
-    except Exception as e:
-        print(f"❌ Database init failed: {e}")
-        # Tables will be created on first request via create_all fallback
-        try:
-            from .models import Base
-            from .database import engine
-            Base.metadata.create_all(bind=engine)
-            print("✅ Tables created via emergency create_all")
-        except Exception as e2:
-            print(f"❌ Emergency create_all also failed: {e2}")
-    # Migrate schema if old password_hash column exists (drop all + recreate)
-    try:
-        from sqlalchemy import text
-        from .database import engine
-        from .models import Base
-        with engine.connect() as conn:
-            result = conn.execute(text(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = 'users' AND column_name = 'password_hash'"
-            ))
-            if result.fetchone():
-                print("🔄 Old schema detected (password_hash found), dropping all tables...")
-                Base.metadata.drop_all(bind=engine)
-                Base.metadata.create_all(bind=engine)
-                print("✅ Schema migrated to new Supabase-auth schema")
-            else:
-                # Add any missing columns on new schema
-                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS share_token VARCHAR"))
-                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP"))
-                conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_share_token ON users (share_token)"))
-                conn.commit()
-                print("✅ Column migration check complete")
-    except Exception as e:
-        print(f"⚠️  Column migration check failed: {e}")
+    """Initialize database and Cloudinary on startup.
+
+    Migrations are the single source of truth for schema changes (see
+    backend/alembic/versions/). A failure here must stop the app from
+    starting rather than silently falling back to a different schema.
+    """
+    init_db()
+    print("✅ Database initialized")
     try:
         init_cloudinary()
         print("✅ Cloudinary configured")
@@ -209,7 +188,6 @@ def validate_university_email(email: str) -> bool:
     valid_domains = (
         "@mcgill.ca",
         "@mail.mcgill.ca",
-        "@alumni.mcgill.ca",
         "@concordia.ca",
         "@live.concordia.ca",
         "@mail.concordia.ca",
@@ -248,7 +226,7 @@ def get_share_token(
     current_user: User = Depends(get_current_user)
 ):
     """Get or generate a shareable profile token for the user"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot get share token for another user")
 
     user = db.query(User).filter(User.id == user_id).first()
@@ -273,13 +251,19 @@ def get_profile(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # A block (in either direction) hides the profile, same as matches/threads/etc.
+    if str(current_user.id) != user_id:
+        blocked_ids = get_blocked_user_ids(str(current_user.id), db)
+        if user_id in {str(b) for b in blocked_ids}:
+            raise HTTPException(status_code=404, detail="User not found")
+
     # Feature 3: compute is_online — True when last_seen is None AND user has an active WS connection
-    is_online = (user.last_seen is None) and (user.id in ws_manager.active_connections)
+    is_online = (user.last_seen is None) and (str(user.id) in ws_manager.active_connections)
 
     return UserProfile(
-        id=user.id,
+        id=str(user.id),
         name=user.name,
-        email=user.email,
+        email=user.email if str(current_user.id) == user_id else None,
         university=user.university,
         program=user.program,
         bio=user.bio,
@@ -300,7 +284,7 @@ def update_profile(
     current_user: User = Depends(get_current_user)
 ):
     """Update user profile (bio) - must be own profile"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot update another user's profile")
 
     user = db.query(User).filter(User.id == user_id).first()
@@ -328,7 +312,7 @@ async def upload_picture(
     current_user: User = Depends(get_current_user)
 ):
     """Upload profile picture to Cloudinary - must be own profile"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot upload picture for another user")
 
     user = db.query(User).filter(User.id == user_id).first()
@@ -345,11 +329,9 @@ async def upload_picture(
     if len(file_content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=413, detail="File too large. Maximum size is 5MB.")
 
-    # Delete old picture if exists
-    if user.profile_pic_url:
-        delete_profile_picture(user.id)
-
-    # Upload to Cloudinary
+    # upload_profile_picture uploads to a temp public_id and only promotes it to
+    # the user's stable public_id (replacing the old picture) after moderation
+    # passes — a rejected/failed upload never touches the existing picture.
     picture_url, rejection_reason = await upload_profile_picture(file_content, user.id)
 
     if rejection_reason == "rejected":
@@ -397,8 +379,8 @@ def _recalculate_matches_for_user(user_id: str, db: Session) -> None:
             if other_user.id in blocked_ids:
                 continue
 
-            user_a_id = min(user_id, other_user.id)
-            user_b_id = max(user_id, other_user.id)
+            user_a_id = min(user_id, str(other_user.id))
+            user_b_id = max(user_id, str(other_user.id))
 
             existing_match = db.query(Match).filter(
                 Match.user1_id == user_a_id,
@@ -427,7 +409,7 @@ def submit_questionnaire(
     current_user: User = Depends(get_current_user)
 ):
     """Submit or update questionnaire responses"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot submit questionnaire for another user")
 
     user = db.query(User).filter(User.id == user_id).first()
@@ -470,7 +452,7 @@ def calculate_matches(
     current_user: User = Depends(get_current_user)
 ):
     """Calculate and store matches for a user"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot calculate matches for another user")
 
     user = db.query(User).filter(User.id == user_id).first()
@@ -516,8 +498,8 @@ def calculate_matches(
                 continue
 
             # Normalize match: always store smaller user_id first
-            user_a_id = min(user_id, other_user.id)
-            user_b_id = max(user_id, other_user.id)
+            user_a_id = min(user_id, str(other_user.id))
+            user_b_id = max(user_id, str(other_user.id))
 
             existing_match = db.query(Match).filter(
                 Match.user1_id == user_a_id,
@@ -549,7 +531,7 @@ def get_matches(
     current_user: User = Depends(get_current_user)
 ):
     """Get all matches for a user, sorted by compatibility score (paginated)"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot view another user's matches")
 
     user = db.query(User).filter(User.id == user_id).first()
@@ -617,8 +599,8 @@ def get_matches(
                 budget = get_question_text("budget", responses.get("budget", 0))
 
         result.append(MatchResponse(
-            id=match.id,
-            user_id=other_user.id,
+            id=str(match.id),
+            user_id=str(other_user.id),
             name=other_user.name,
             program=other_user.program,
             university=other_user.university,
@@ -649,7 +631,7 @@ def explain_match(
     current_user: User = Depends(get_current_user)
 ):
     """Generate an AI-powered natural language explanation of why two users match"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
     # Get both users and their questionnaires
@@ -677,9 +659,9 @@ def explain_match(
     def format_responses(responses: dict) -> str:
         lines = []
         for key, value in responses.items():
-            label = get_question_text(key)
+            label = QUESTION_LABELS.get(key)
             if label:
-                lines.append(f"- {label}: {value}")
+                lines.append(f"- {label}: {get_question_text(key, value)}")
         return "\n".join(lines) if lines else "No responses"
 
     user_prefs = format_responses(user_q.responses)
@@ -709,7 +691,7 @@ Write the explanation directly (no preamble like "Here is..." or "Based on...").
 
         ai_client = anthropic.Anthropic(api_key=api_key)
         response = ai_client.messages.create(
-            model="claude-opus-4-6",
+            model="claude-sonnet-5",
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -731,7 +713,7 @@ def get_match_breakdown(
     current_user: User = Depends(get_current_user)
 ):
     """Return per-category compatibility breakdown between two users."""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
     user_q = db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == user_id).first()
@@ -756,7 +738,7 @@ def swipe_like(
     Handle a swipe (like or pass) on a user.
     If it's a right swipe (like) and the other user has already liked back, it's a mutual match.
     """
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot swipe as another user")
 
     # Prevent self-swiping
@@ -826,8 +808,8 @@ def swipe_like(
 
 @app.get("/api/swipes/check-like/{user_id1}/{user_id2}")
 def check_like(
-    user_id1: int,
-    user_id2: int,
+    user_id1: str,
+    user_id2: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -835,7 +817,7 @@ def check_like(
     Check if user1 has liked user2.
     Used to determine if users can message each other.
     """
-    if current_user.id != user_id1:
+    if str(current_user.id) != user_id1:
         raise HTTPException(status_code=403, detail="Cannot check likes for another user")
 
     like = db.query(Like).filter(
@@ -856,7 +838,7 @@ def get_swipe_history(
     current_user: User = Depends(get_current_user)
 ):
     """Get all users this person has liked (swiped right on)"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot view another user's swipes")
 
     likes = db.query(Like).filter(
@@ -890,7 +872,7 @@ def get_swipe_history(
         if not u:
             continue
         result.append(SwipeHistoryItem(
-            user_id=u.id,
+            user_id=str(u.id),
             name=u.name,
             university=u.university,
             profile_pic_url=u.profile_pic_url,
@@ -912,7 +894,7 @@ async def send_message(
     current_user: User = Depends(get_current_user)
 ):
     """Send a message to another user"""
-    if current_user.id != sender_id:
+    if str(current_user.id) != sender_id:
         raise HTTPException(status_code=403, detail="Cannot send messages as another user")
 
     # Prevent self-messaging
@@ -926,7 +908,7 @@ async def send_message(
 
     # Block check: prevent messaging if either user has blocked the other
     blocked_ids = get_blocked_user_ids(sender_id, db)
-    if data.recipient_id in blocked_ids:
+    if data.recipient_id in {str(b) for b in blocked_ids}:
         raise HTTPException(status_code=403, detail="Cannot send message to this user")
 
     # Create message
@@ -962,7 +944,7 @@ def get_conversations(
     current_user: User = Depends(get_current_user)
 ):
     """Get all conversations for a user with previews"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot view another user's conversations")
 
     # Get blocked user IDs (bidirectional) to filter out from threads.
@@ -979,10 +961,11 @@ def get_conversations(
     last_message_map = {}
     unread_count_map = {}
     for msg in all_messages:
-        partner = msg.recipient_id if msg.sender_id == user_id else msg.sender_id
+        is_sender = str(msg.sender_id) == user_id
+        partner = msg.recipient_id if is_sender else msg.sender_id
         if partner not in last_message_map:
             last_message_map[partner] = msg  # desc-ordered, so first seen is latest
-        if msg.recipient_id == user_id and not msg.read:
+        if not is_sender and not msg.read:
             unread_count_map[partner] = unread_count_map.get(partner, 0) + 1
 
     other_user_ids = set(last_message_map.keys())
@@ -1003,7 +986,7 @@ def get_conversations(
         unread_count = unread_count_map.get(other_user_id, 0)
 
         conversations.append(ConversationPreview(
-            user_id=other_user.id,
+            user_id=str(other_user.id),
             name=other_user.name,
             profile_pic_url=other_user.profile_pic_url,
             last_message=last_message.content[:50] + "..." if len(last_message.content) > 50 else last_message.content,
@@ -1025,7 +1008,7 @@ def get_message_thread(
     current_user: User = Depends(get_current_user)
 ):
     """Get paginated messages between two users"""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot view another user's messages")
 
     messages = db.query(Message).filter(
@@ -1042,7 +1025,17 @@ def get_message_thread(
     ).update({"read": True})
     db.commit()
 
-    return messages
+    return [
+        MessageResponse(
+            id=str(m.id),
+            sender_id=str(m.sender_id),
+            recipient_id=str(m.recipient_id),
+            content=m.content,
+            sent_at=m.sent_at,
+            read=m.read,
+        )
+        for m in messages
+    ]
 
 
 @app.post("/api/messages/mark-read/{message_id}")
@@ -1140,7 +1133,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, token: str = Qu
 
                     # Block check: prevent messaging if either user has blocked the other
                     blocked_ids = get_blocked_user_ids(user_id, db)
-                    if recipient_id in blocked_ids:
+                    if recipient_id in {str(b) for b in blocked_ids}:
                         await websocket.send_json({"type": "error", "detail": "Cannot send message to this user"})
                         continue
 
@@ -1184,6 +1177,12 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, token: str = Qu
                         db.close()
 
     except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        # Any unexpected error (bad JSON, a bug, etc.) must not leak the connection —
+        # fall through to the same cleanup a clean disconnect gets.
+        print(f"WEBSOCKET ERROR for user {user_id}: {type(e).__name__}: {e}")
+    finally:
         ws_manager.disconnect(user_id)
         # Feature 3: record when the user went offline
         _ws_db = next(get_db())
@@ -1205,19 +1204,16 @@ def ping():
 
 @app.get("/api/health")
 def health_check(db: Session = Depends(get_db)):
-    """Health check endpoint with DB"""
+    """Readiness check: verifies the database is reachable."""
     try:
-        user_count = db.query(User).count()
-        return {
-            "status": "ok",
-            "users": user_count,
-            "database": "connected"
-        }
+        db.execute(text("SELECT 1"))
+        return {"status": "ok", "database": "connected"}
     except Exception as e:
-        return {
-            "status": "error",
-            "database": str(e)
-        }
+        print(f"HEALTH CHECK DB ERROR: {type(e).__name__}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "error", "database": "unavailable"}
+        )
 
 
 # ─── Development: Create Fake Users ───
@@ -1235,7 +1231,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "mcgill",
             "program": "Engineering",
             "bio": "Third-year engineering student who loves hiking and cooking. Looking for a clean, quiet roommate.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 1, "genderPreference": 2, "age": 1, "program": 2, "budget": 1, "location": 0, "religion": 5, "sleepSchedule": 2, "cleanliness": 1, "noise": 0, "guests": 1, "study": 2, "dietary": 0, "workFromHome": 1, "pets": 2, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 1, "genderPreference": 3, "age": 1, "program": 2, "budget": 1, "location": 0, "religion": 5, "sleepSchedule": 2, "cleanliness": 1, "noise": 0, "guests": 1, "study": 2, "dietary": 0, "workFromHome": 1, "pets": 2, "language": 0, "moveIn": 0}
         },
         {
             "name": "Liam Chen",
@@ -1243,7 +1239,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Commerce/Management",
             "bio": "Business student and gym enthusiast. Social but respectful of personal space.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 2, "age": 0, "program": 3, "budget": 2, "location": 2, "religion": 0, "sleepSchedule": 1, "cleanliness": 1, "noise": 2, "guests": 2, "study": 1, "dietary": 0, "workFromHome": 0, "pets": 0, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 0, "program": 3, "budget": 2, "location": 2, "religion": 0, "sleepSchedule": 1, "cleanliness": 1, "noise": 2, "guests": 2, "study": 1, "dietary": 0, "workFromHome": 0, "pets": 0, "language": 0, "moveIn": 0}
         },
         {
             "name": "Sophia Patel",
@@ -1259,7 +1255,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Arts",
             "bio": "Art history major and part-time barista. Love music, museums, and good conversations.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 2, "age": 1, "program": 0, "budget": 1, "location": 1, "religion": 0, "sleepSchedule": 2, "cleanliness": 2, "noise": 1, "guests": 2, "study": 1, "dietary": 2, "workFromHome": 2, "pets": 2, "language": 2, "moveIn": 1}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 1, "program": 0, "budget": 1, "location": 1, "religion": 0, "sleepSchedule": 2, "cleanliness": 2, "noise": 1, "guests": 2, "study": 1, "dietary": 2, "workFromHome": 2, "pets": 2, "language": 2, "moveIn": 1}
         },
         {
             "name": "Olivia Martinez",
@@ -1275,7 +1271,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Engineering",
             "bio": "Computer engineering student and gamer. Night owl who's chill and easy-going.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 2, "age": 0, "program": 2, "budget": 1, "location": 4, "religion": 0, "sleepSchedule": 1, "cleanliness": 2, "noise": 1, "guests": 1, "study": 2, "dietary": 0, "workFromHome": 3, "pets": 2, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 0, "program": 2, "budget": 1, "location": 4, "religion": 0, "sleepSchedule": 1, "cleanliness": 2, "noise": 1, "guests": 1, "study": 2, "dietary": 0, "workFromHome": 3, "pets": 2, "language": 0, "moveIn": 0}
         },
         {
             "name": "Ava Leblanc",
@@ -1283,7 +1279,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "mcgill",
             "program": "Music",
             "bio": "Music performance student. I practice piano daily but use headphones! Love cats.",
-            "responses": {"hasApartment": 1, "livingLocation": 0, "mcgillResidence": 0, "gender": 1, "genderPreference": 2, "age": 0, "program": 6, "budget": 0, "location": 1, "religion": 0, "sleepSchedule": 2, "cleanliness": 1, "noise": 1, "guests": 1, "study": 2, "dietary": 2, "workFromHome": 1, "pets": 1, "language": 2, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 0, "mcgillResidence": 0, "gender": 1, "genderPreference": 3, "age": 0, "program": 6, "budget": 0, "location": 1, "religion": 0, "sleepSchedule": 2, "cleanliness": 1, "noise": 1, "guests": 1, "study": 2, "dietary": 2, "workFromHome": 1, "pets": 1, "language": 2, "moveIn": 0}
         },
         {
             "name": "Mason Williams",
@@ -1291,7 +1287,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Science",
             "bio": "Biology major and fitness enthusiast. Early riser who keeps things clean and organized.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 2, "age": 1, "program": 1, "budget": 1, "location": 3, "religion": 1, "sleepSchedule": 0, "cleanliness": 0, "noise": 1, "guests": 1, "study": 1, "dietary": 3, "workFromHome": 0, "pets": 2, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 1, "program": 1, "budget": 1, "location": 3, "religion": 1, "sleepSchedule": 0, "cleanliness": 0, "noise": 1, "guests": 1, "study": 1, "dietary": 3, "workFromHome": 0, "pets": 2, "language": 0, "moveIn": 0}
         },
         {
             "name": "Isabella Nguyen",
@@ -1299,7 +1295,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "mcgill",
             "program": "Commerce/Management",
             "bio": "Marketing major and social butterfly. Love hosting small gatherings and trying new recipes.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 1, "genderPreference": 2, "age": 1, "program": 3, "budget": 2, "location": 2, "religion": 2, "sleepSchedule": 2, "cleanliness": 1, "noise": 2, "guests": 3, "study": 1, "dietary": 0, "workFromHome": 2, "pets": 2, "language": 0, "moveIn": 1}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 1, "genderPreference": 3, "age": 1, "program": 3, "budget": 2, "location": 2, "religion": 2, "sleepSchedule": 2, "cleanliness": 1, "noise": 2, "guests": 3, "study": 1, "dietary": 0, "workFromHome": 2, "pets": 2, "language": 0, "moveIn": 1}
         },
         {
             "name": "James Anderson",
@@ -1307,7 +1303,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Education",
             "bio": "Education student and aspiring teacher. Friendly, responsible, and drama-free.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 2, "age": 2, "program": 7, "budget": 1, "location": 0, "religion": 1, "sleepSchedule": 0, "cleanliness": 1, "noise": 1, "guests": 2, "study": 2, "dietary": 0, "workFromHome": 1, "pets": 2, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 2, "program": 7, "budget": 1, "location": 0, "religion": 1, "sleepSchedule": 0, "cleanliness": 1, "noise": 1, "guests": 2, "study": 2, "dietary": 0, "workFromHome": 1, "pets": 2, "language": 0, "moveIn": 0}
         }
     ]
 
@@ -1413,7 +1409,7 @@ def delete_account(
     Delete a user account and all associated data.
     JWT must belong to the user being deleted.
     """
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot delete another user's account")
 
     user = db.query(User).filter(User.id == user_id).first()
@@ -1481,7 +1477,7 @@ def block_user(
     Note: existing match rows and message threads are NOT deleted — they are hidden at the API layer.
     If the block is later removed, they will reappear.
     """
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot block as another user")
 
     if data.blocked_user_id == user_id:
@@ -1515,7 +1511,7 @@ def unblock_user(
     current_user: User = Depends(get_current_user)
 ):
     """Remove a block. Once removed, matches and threads between the users reappear."""
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot unblock as another user")
 
     block = db.query(Block).filter(
@@ -1542,7 +1538,7 @@ def report_user(
     """
     Report another user. Duplicate reports are allowed (append-only for moderation review).
     """
-    if current_user.id != user_id:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=403, detail="Cannot report as another user")
 
     if data.reported_user_id == user_id:

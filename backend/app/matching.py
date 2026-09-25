@@ -1,18 +1,22 @@
 from typing import Dict
 
 
+GENDER_PREFERENCE_NO_PREFERENCE = 3  # index of "No preference" in genderPreference options
+
+
 def _gender_score(user1_responses: Dict, user2_responses: Dict) -> float:
     """Returns 0, 10, or 20 points for gender preference compatibility."""
     user1_gender = user1_responses.get("gender", 0)
     user2_gender = user2_responses.get("gender", 0)
-    user1_pref = user1_responses.get("genderPreference", 2)
-    user2_pref = user2_responses.get("genderPreference", 2)
+    user1_pref = user1_responses.get("genderPreference", GENDER_PREFERENCE_NO_PREFERENCE)
+    user2_pref = user2_responses.get("genderPreference", GENDER_PREFERENCE_NO_PREFERENCE)
+    no_pref = GENDER_PREFERENCE_NO_PREFERENCE
 
-    if user1_pref == 2 and user2_pref == 2:
+    if user1_pref == no_pref and user2_pref == no_pref:
         return 20
-    elif (user1_pref == 2 or user1_pref == user2_gender) and (user2_pref == 2 or user2_pref == user1_gender):
+    elif (user1_pref == no_pref or user1_pref == user2_gender) and (user2_pref == no_pref or user2_pref == user1_gender):
         return 20
-    elif (user1_pref != 2 and user1_pref == user2_gender) or (user2_pref != 2 and user2_pref == user1_gender):
+    elif (user1_pref != no_pref and user1_pref == user2_gender) or (user2_pref != no_pref and user2_pref == user1_gender):
         return 10
     return 0
 
@@ -332,8 +336,8 @@ def calculate_compatibility_breakdown(user1_responses: Dict, user2_responses: Di
 
     # ─── Gender Preference ───
     gender_score = _gender_score(user1_responses, user2_responses)
-    u1_gp = user1_responses.get("genderPreference", 2)
-    u2_gp = user2_responses.get("genderPreference", 2)
+    u1_gp = user1_responses.get("genderPreference", GENDER_PREFERENCE_NO_PREFERENCE)
+    u2_gp = user2_responses.get("genderPreference", GENDER_PREFERENCE_NO_PREFERENCE)
     categories.append({
         "name": "Gender Preference",
         "icon": "👤",
@@ -394,6 +398,38 @@ def calculate_compatibility_breakdown(user1_responses: Dict, user2_responses: Di
     return {"overall_score": overall_score, "categories": categories}
 
 
+QUESTION_LABELS = {
+    "university": "University",
+    "hasApartment": "Has apartment",
+    "livingLocation": "Living situation",
+    "mcgillResidence": "McGill residence",
+    "concordiaResidence": "Concordia residence",
+    "year": "Year",
+    "gender": "Gender",
+    "genderPreference": "Preferred roommate gender",
+    "age": "Age",
+    "program": "Program",
+    "budget": "Budget",
+    "location": "Preferred area",
+    "apartmentLocation": "Apartment area",
+    "apartmentRent": "Rent",
+    "apartmentRooms": "Bedrooms",
+    "spotsAvailable": "Spots available",
+    "apartmentAvailable": "Available from",
+    "religion": "Religion",
+    "sleepSchedule": "Sleep schedule",
+    "cleanliness": "Cleanliness",
+    "noise": "Noise level",
+    "guests": "Guests",
+    "study": "Study habits",
+    "dietary": "Dietary",
+    "workFromHome": "Works from home",
+    "pets": "Pets",
+    "language": "Language at home",
+    "moveIn": "Move-in date",
+}
+
+
 def get_question_text(question_id: str, option_index: int) -> str:
     """
     Helper function to convert question ID and option index to readable text.
@@ -407,7 +443,7 @@ def get_question_text(question_id: str, option_index: int) -> str:
         "concordiaResidence": ["Grey Nuns Residence", "Hingston Hall"],
         "year": ["U0", "U1", "U2", "U3", "U4", "Masters", "PhD", "Other"],
         "gender": ["Male", "Female", "Non-binary", "Prefer not to say"],
-        "genderPreference": ["Male", "Female", "No preference"],
+        "genderPreference": ["Male", "Female", "Non-binary", "No preference"],
         "age": ["18-20", "21-23", "24-26", "27+"],
         "program": ["Arts", "Science", "Engineering", "Commerce/Management", "Medicine", "Law", "Education", "Music", "Other"],
         "budget": ["$700–$1000", "$1000–$1300", "$1300–$1500", "$1500+", "Custom amount"],
