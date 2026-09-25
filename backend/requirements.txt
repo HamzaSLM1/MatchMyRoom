@@ -3,10 +3,10 @@ uvicorn==0.39.0
 pydantic==2.12.5
 sqlalchemy==2.0.23
 cloudinary==1.36.0
-python-multipart==0.0.6
-python-dotenv==1.0.0
+python-multipart==0.0.20
+python-dotenv==1.2.1
 email-validator==2.3.0
-PyJWT==2.11.0
+PyJWT==2.15.0
 slowapi==0.1.9
 resend==2.21.0
 psycopg2-binary==2.9.9
