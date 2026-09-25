@@ -1,148 +1,18 @@
 """
 Tests for Agent 2 backend features:
-- Password reset (forgot-password, reset-password)
 - Account deletion (DELETE /api/users/{user_id})
 - Block / Unblock / Report
 - Block filtering in matches and messages
 - Matching algorithm bug fixes
+
+Note: password-reset (/api/auth/forgot-password, /api/auth/reset-password) and
+local login/signup no longer exist — auth moved to Supabase. Those tests were
+removed rather than adapted, since there's no current equivalent endpoint.
 """
 import pytest
 from datetime import datetime, timedelta
 from unittest.mock import patch
 from tests.conftest import auth_header, sample_questionnaire_responses
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Password Reset Tests
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class TestForgotPassword:
-    def test_always_returns_200_for_nonexistent_email(self, client):
-        """Anti-enumeration: non-existent email still gets 200."""
-        resp = client.post("/api/auth/forgot-password", json={"email": "nobody@mcgill.ca"})
-        assert resp.status_code == 200
-        assert "registered" in resp.json()["message"].lower()
-
-    def test_returns_200_for_existing_email(self, client, create_verified_user):
-        user = create_verified_user(email="reset@mcgill.ca")
-        with patch("backend.app.main.send_email", return_value=True):
-            resp = client.post("/api/auth/forgot-password", json={"email": "reset@mcgill.ca"})
-        assert resp.status_code == 200
-        assert "registered" in resp.json()["message"].lower()
-
-    def test_creates_token_in_db(self, client, create_verified_user, db_session):
-        from backend.app.models import PasswordResetToken
-        user = create_verified_user(email="tokentest@mcgill.ca")
-        with patch("backend.app.main.send_email", return_value=True):
-            client.post("/api/auth/forgot-password", json={"email": "tokentest@mcgill.ca"})
-        token = db_session.query(PasswordResetToken).filter(
-            PasswordResetToken.user_id == user.id
-        ).first()
-        assert token is not None
-        assert not token.used
-
-    def test_replaces_old_tokens(self, client, create_verified_user, db_session):
-        from backend.app.models import PasswordResetToken
-        user = create_verified_user(email="replace@mcgill.ca")
-        with patch("backend.app.main.send_email", return_value=True):
-            client.post("/api/auth/forgot-password", json={"email": "replace@mcgill.ca"})
-            client.post("/api/auth/forgot-password", json={"email": "replace@mcgill.ca"})
-        tokens = db_session.query(PasswordResetToken).filter(
-            PasswordResetToken.user_id == user.id
-        ).all()
-        # Should only have 1 token after second request
-        assert len(tokens) == 1
-
-
-class TestResetPassword:
-    def _get_token(self, client, db_session, user):
-        from backend.app.models import PasswordResetToken
-        with patch("backend.app.main.send_email", return_value=True):
-            client.post("/api/auth/forgot-password", json={"email": user.email})
-        db_session.expire_all()
-        token = db_session.query(PasswordResetToken).filter(
-            PasswordResetToken.user_id == user.id
-        ).first()
-        return token.token
-
-    def test_valid_token_resets_password(self, client, create_verified_user, db_session):
-        user = create_verified_user(email="validreset@mcgill.ca")
-        token = self._get_token(client, db_session, user)
-
-        resp = client.post("/api/auth/reset-password", json={
-            "token": token,
-            "new_password": "newpassword123"
-        })
-        assert resp.status_code == 200
-        assert "successfully" in resp.json()["message"].lower()
-
-    def test_token_marked_used_after_reset(self, client, create_verified_user, db_session):
-        from backend.app.models import PasswordResetToken
-        user = create_verified_user(email="usedtoken@mcgill.ca")
-        token_str = self._get_token(client, db_session, user)
-
-        client.post("/api/auth/reset-password", json={
-            "token": token_str,
-            "new_password": "newpassword123"
-        })
-
-        db_session.expire_all()
-        token = db_session.query(PasswordResetToken).filter(
-            PasswordResetToken.token == token_str
-        ).first()
-        assert token.used
-
-    def test_used_token_returns_400(self, client, create_verified_user, db_session):
-        user = create_verified_user(email="reuse@mcgill.ca")
-        token = self._get_token(client, db_session, user)
-
-        # First reset — should succeed
-        client.post("/api/auth/reset-password", json={"token": token, "new_password": "pass12345"})
-
-        # Second reset with same token — should fail
-        resp = client.post("/api/auth/reset-password", json={"token": token, "new_password": "pass12345"})
-        assert resp.status_code == 400
-
-    def test_invalid_token_returns_400(self, client):
-        resp = client.post("/api/auth/reset-password", json={
-            "token": "totally-fake-token-xyz",
-            "new_password": "pass12345"
-        })
-        assert resp.status_code == 400
-
-    def test_expired_token_returns_400(self, client, create_verified_user, db_session):
-        from backend.app.models import PasswordResetToken
-        user = create_verified_user(email="expired@mcgill.ca")
-        token_str = self._get_token(client, db_session, user)
-
-        # Manually expire the token
-        token = db_session.query(PasswordResetToken).filter(
-            PasswordResetToken.token == token_str
-        ).first()
-        token.expires_at = datetime.utcnow() - timedelta(hours=2)
-        db_session.commit()
-
-        resp = client.post("/api/auth/reset-password", json={
-            "token": token_str,
-            "new_password": "pass12345"
-        })
-        assert resp.status_code == 400
-
-    def test_can_login_with_new_password_after_reset(self, client, create_verified_user, db_session):
-        user = create_verified_user(email="newlogin@mcgill.ca", password="oldpassword123")
-        token = self._get_token(client, db_session, user)
-
-        client.post("/api/auth/reset-password", json={
-            "token": token,
-            "new_password": "newpassword456"
-        })
-
-        resp = client.post("/api/login", json={
-            "email": "newlogin@mcgill.ca",
-            "password": "newpassword456"
-        })
-        assert resp.status_code == 200
-        assert resp.json()["token"] != ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -207,7 +77,7 @@ class TestBlock:
         headers = auth_header(blocker.id, blocker.email)
 
         resp = client.post(f"/api/users/{blocker.id}/block",
-                           json={"blocked_user_id": target.id},
+                           json={"blocked_user_id": str(target.id)},
                            headers=headers)
         assert resp.status_code == 200
         assert "blocked" in resp.json()["message"].lower()
@@ -223,7 +93,7 @@ class TestBlock:
         headers = auth_header(user.id, user.email)
 
         resp = client.post(f"/api/users/{user.id}/block",
-                           json={"blocked_user_id": user.id},
+                           json={"blocked_user_id": str(user.id)},
                            headers=headers)
         assert resp.status_code == 400
         assert "yourself" in resp.json()["detail"].lower()
@@ -234,11 +104,11 @@ class TestBlock:
         headers = auth_header(blocker.id, blocker.email)
 
         client.post(f"/api/users/{blocker.id}/block",
-                    json={"blocked_user_id": target.id},
+                    json={"blocked_user_id": str(target.id)},
                     headers=headers)
 
         resp = client.post(f"/api/users/{blocker.id}/block",
-                           json={"blocked_user_id": target.id},
+                           json={"blocked_user_id": str(target.id)},
                            headers=headers)
         assert resp.status_code == 400
         assert "already blocked" in resp.json()["detail"].lower()
@@ -250,7 +120,7 @@ class TestBlock:
         headers = auth_header(blocker.id, blocker.email)
 
         client.post(f"/api/users/{blocker.id}/block",
-                    json={"blocked_user_id": target.id},
+                    json={"blocked_user_id": str(target.id)},
                     headers=headers)
 
         resp = client.delete(f"/api/users/{blocker.id}/block/{target.id}", headers=headers)
@@ -280,7 +150,7 @@ class TestBlock:
 
         # user1 tries to block as user2
         resp = client.post(f"/api/users/{user2.id}/block",
-                           json={"blocked_user_id": user3.id},
+                           json={"blocked_user_id": str(user3.id)},
                            headers=headers)
         assert resp.status_code == 403
 
@@ -297,7 +167,7 @@ class TestReport:
         headers = auth_header(reporter.id, reporter.email)
 
         resp = client.post(f"/api/users/{reporter.id}/report",
-                           json={"reported_user_id": target.id, "reason": "Harassment"},
+                           json={"reported_user_id": str(target.id), "reason": "Harassment"},
                            headers=headers)
         assert resp.status_code == 200
         assert "submitted" in resp.json()["message"].lower()
@@ -314,7 +184,7 @@ class TestReport:
         headers = auth_header(user.id, user.email)
 
         resp = client.post(f"/api/users/{user.id}/report",
-                           json={"reported_user_id": user.id, "reason": "Test"},
+                           json={"reported_user_id": str(user.id), "reason": "Test"},
                            headers=headers)
         assert resp.status_code == 400
         assert "yourself" in resp.json()["detail"].lower()
@@ -326,10 +196,10 @@ class TestReport:
         headers = auth_header(reporter.id, reporter.email)
 
         client.post(f"/api/users/{reporter.id}/report",
-                    json={"reported_user_id": target.id, "reason": "Spam"},
+                    json={"reported_user_id": str(target.id), "reason": "Spam"},
                     headers=headers)
         resp = client.post(f"/api/users/{reporter.id}/report",
-                           json={"reported_user_id": target.id, "reason": "Fake Profile"},
+                           json={"reported_user_id": str(target.id), "reason": "Fake Profile"},
                            headers=headers)
         assert resp.status_code == 200
 
@@ -358,7 +228,7 @@ class TestBlockFiltering:
         # A blocks B
         headers_a = auth_header(user_a.id, user_a.email)
         client.post(f"/api/users/{user_a.id}/block",
-                    json={"blocked_user_id": user_b.id},
+                    json={"blocked_user_id": str(user_b.id)},
                     headers=headers_a)
 
         # A's conversations should not include B
@@ -366,7 +236,7 @@ class TestBlockFiltering:
         assert resp.status_code == 200
         convos = resp.json()
         other_ids = [c["user_id"] for c in convos]
-        assert user_b.id not in other_ids
+        assert str(user_b.id) not in other_ids
 
     def test_blocked_user_cannot_send_message(self, client, create_verified_user):
         user_a = create_verified_user(email="nosend_a@mcgill.ca")
@@ -375,13 +245,13 @@ class TestBlockFiltering:
         # A blocks B
         headers_a = auth_header(user_a.id, user_a.email)
         client.post(f"/api/users/{user_a.id}/block",
-                    json={"blocked_user_id": user_b.id},
+                    json={"blocked_user_id": str(user_b.id)},
                     headers=headers_a)
 
         # B tries to send a message to A — should be blocked (bidirectional)
         headers_b = auth_header(user_b.id, user_b.email)
         resp = client.post("/api/messages/send",
-                           json={"recipient_id": user_a.id, "content": "Hello!"},
+                           json={"recipient_id": str(user_a.id), "content": "Hello!"},
                            params={"sender_id": user_b.id},
                            headers=headers_b)
         assert resp.status_code == 403
@@ -393,12 +263,12 @@ class TestBlockFiltering:
         # A blocks B
         headers_a = auth_header(user_a.id, user_a.email)
         client.post(f"/api/users/{user_a.id}/block",
-                    json={"blocked_user_id": user_b.id},
+                    json={"blocked_user_id": str(user_b.id)},
                     headers=headers_a)
 
         # A tries to send to B — should also be blocked
         resp = client.post("/api/messages/send",
-                           json={"recipient_id": user_b.id, "content": "Hello!"},
+                           json={"recipient_id": str(user_b.id), "content": "Hello!"},
                            params={"sender_id": user_a.id},
                            headers=headers_a)
         assert resp.status_code == 403
@@ -409,20 +279,22 @@ class TestBlockFiltering:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestMatchingBugFixes:
-    def test_no_preference_gender_default_is_2(self):
-        """Bug 2 fix: genderPreference default is now 2 (No preference), not 3."""
-        from backend.app.matching import _gender_score
-        # Both users with no genderPreference key — should default to 2 (No preference)
+    def test_no_preference_gender_default_is_3(self):
+        """genderPreference default (GENDER_PREFERENCE_NO_PREFERENCE) is 3, matching the
+        4-option ["Male", "Female", "Non-binary", "No preference"] list in matching.py."""
+        from backend.app.matching import _gender_score, GENDER_PREFERENCE_NO_PREFERENCE
+        assert GENDER_PREFERENCE_NO_PREFERENCE == 3
+        # Both users with no genderPreference key — should default to 3 (No preference)
         # and get full 20 points
         score = _gender_score({}, {})
         assert score == 20
 
     def test_no_preference_explicit_both_same(self):
-        """Both users explicitly set genderPreference=2 (No preference) → 20 points."""
+        """Both users explicitly set genderPreference=3 (No preference) → 20 points."""
         from backend.app.matching import _gender_score
         score = _gender_score(
-            {"gender": 0, "genderPreference": 2},
-            {"gender": 1, "genderPreference": 2}
+            {"gender": 0, "genderPreference": 3},
+            {"gender": 1, "genderPreference": 3}
         )
         assert score == 20
 
@@ -433,12 +305,12 @@ class TestMatchingBugFixes:
         r1 = {
             "hasApartment": 1, "budget": 1, "location": 2,
             "sleepSchedule": 1, "cleanliness": 1, "noise": 1, "guests": 1, "study": 1,
-            "gender": 0, "genderPreference": 2
+            "gender": 0, "genderPreference": 3
         }
         r2 = {
             "hasApartment": 1, "budget": 1, "location": 2,
             "sleepSchedule": 1, "cleanliness": 1, "noise": 1, "guests": 1, "study": 1,
-            "gender": 1, "genderPreference": 2
+            "gender": 1, "genderPreference": 3
         }
         score = calculate_compatibility(r1, r2)
         # With matching budget(30), location(25), gender(20), lifestyle(20), pets partial = high score

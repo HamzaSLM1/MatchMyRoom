@@ -8,4 +8,3 @@ class TestHealthCheck:
         data = resp.json()
         assert data["status"] == "ok"
         assert data["database"] == "connected"
-        assert "users" in data

@@ -1,6 +1,7 @@
 import pytest
 import sys
 import importlib
+from unittest.mock import patch
 
 
 def test_database_url_required_when_not_set(monkeypatch):
@@ -10,8 +11,11 @@ def test_database_url_required_when_not_set(monkeypatch):
     for key in list(sys.modules.keys()):
         if "backend.app.database" in key or "app.database" in key:
             del sys.modules[key]
-    with pytest.raises(RuntimeError, match="DATABASE_URL"):
-        import backend.app.database  # noqa: F401
+    # Patch load_dotenv so it doesn't re-populate DATABASE_URL from backend/.env
+    # (database.py calls load_dotenv() unconditionally at import time).
+    with patch("dotenv.load_dotenv", return_value=None):
+        with pytest.raises(RuntimeError, match="DATABASE_URL"):
+            import backend.app.database  # noqa: F401
 
 
 def test_database_url_accepted_when_set(monkeypatch):

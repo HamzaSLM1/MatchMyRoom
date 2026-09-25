@@ -1,5 +1,6 @@
 """API tests for match calculation and retrieval endpoints."""
 
+import pytest
 from tests.conftest import auth_header, sample_questionnaire_responses
 
 

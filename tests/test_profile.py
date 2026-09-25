@@ -1,5 +1,6 @@
 """API tests for profile endpoints."""
 
+import uuid
 from tests.conftest import auth_header
 
 
@@ -9,7 +10,7 @@ class TestGetProfile:
         resp = client.get(f"/api/profile/{user.id}", headers=auth_header(user.id, user.email))
         assert resp.status_code == 200
         data = resp.json()
-        assert data["id"] == user.id
+        assert data["id"] == str(user.id)
         assert data["email"] == user.email
 
     def test_get_other_profile(self, client, create_verified_user):
@@ -25,7 +26,7 @@ class TestGetProfile:
 
     def test_get_nonexistent_profile(self, client, create_verified_user):
         user = create_verified_user(email="exists@mcgill.ca")
-        resp = client.get("/api/profile/9999", headers=auth_header(user.id, user.email))
+        resp = client.get(f"/api/profile/{uuid.uuid4()}", headers=auth_header(user.id, user.email))
         assert resp.status_code == 404
 
 

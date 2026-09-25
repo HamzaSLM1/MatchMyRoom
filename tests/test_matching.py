@@ -18,7 +18,7 @@ from backend.app.matching import (
 
 class TestGenderScore:
     def test_both_no_preference(self):
-        assert _gender_score({"genderPreference": 2}, {"genderPreference": 2}) == 20
+        assert _gender_score({"genderPreference": 3}, {"genderPreference": 3}) == 20
 
     def test_mutual_match(self):
         # User1 is male(0), prefers female(1); User2 is female(1), prefers male(0)
@@ -27,7 +27,7 @@ class TestGenderScore:
         assert _gender_score(u1, u2) == 20
 
     def test_one_no_preference_other_matches(self):
-        u1 = {"gender": 0, "genderPreference": 2}
+        u1 = {"gender": 0, "genderPreference": 3}
         u2 = {"gender": 1, "genderPreference": 0}
         assert _gender_score(u1, u2) == 20
 
@@ -43,7 +43,7 @@ class TestGenderScore:
         assert _gender_score(u1, u2) == 0
 
     def test_defaults_when_missing(self):
-        # Defaults: gender=0, genderPreference=2 (no preference)
+        # Defaults: gender=0, genderPreference=3 (no preference)
         assert _gender_score({}, {}) == 20
 
 
@@ -135,7 +135,7 @@ class TestMixedApartment:
             "apartmentLocation": 2,
             "apartmentRent": 1,
             "gender": 0,
-            "genderPreference": 2,
+            "genderPreference": 3,
             "sleepSchedule": 1, "cleanliness": 1, "noise": 1, "guests": 1, "study": 1,
             "pets": 0,
         }
@@ -148,7 +148,7 @@ class TestMixedApartment:
             "location": 2,
             "budget": 1,
             "gender": 0,
-            "genderPreference": 2,
+            "genderPreference": 3,
             "sleepSchedule": 1, "cleanliness": 1, "noise": 1, "guests": 1, "study": 1,
             "pets": 0,
         }
@@ -254,7 +254,7 @@ class TestBothLooking:
             "hasApartment": 1,
             "housingType": 1,
             "gender": 0,
-            "genderPreference": 2,
+            "genderPreference": 3,
             "budget": 1,
             "location": 2,
             "sleepSchedule": 1, "cleanliness": 1, "noise": 1, "guests": 1, "study": 1,
@@ -351,7 +351,7 @@ class TestBothLooking:
     def test_housingType_fallback(self):
         """When only housingType key is present (legacy), it should still work."""
         u1 = {"hasApartment": 1, "housingType": 1, "budget": 1, "location": 2,
-               "gender": 0, "genderPreference": 2,
+               "gender": 0, "genderPreference": 3,
                "sleepSchedule": 1, "cleanliness": 1, "noise": 1, "guests": 1, "study": 1, "pets": 0}
         u2 = u1.copy()
         score = calculate_compatibility(u1, u2)
@@ -360,7 +360,7 @@ class TestBothLooking:
     def test_livingLocation_preferred_over_housingType(self):
         """When both keys exist, livingLocation should take precedence."""
         u1 = {"hasApartment": 1, "livingLocation": 1, "housingType": 0, "budget": 1, "location": 2,
-               "gender": 0, "genderPreference": 2,
+               "gender": 0, "genderPreference": 3,
                "sleepSchedule": 1, "cleanliness": 1, "noise": 1, "guests": 1, "study": 1, "pets": 0}
         u2 = u1.copy()
         score = calculate_compatibility(u1, u2)
@@ -380,7 +380,7 @@ class TestEdgeCases:
 
     def test_non_integer_budget(self):
         u1 = {"hasApartment": 1, "budget": "custom", "location": 2,
-               "gender": 0, "genderPreference": 2,
+               "gender": 0, "genderPreference": 3,
                "sleepSchedule": 1, "cleanliness": 1, "noise": 1, "guests": 1, "study": 1}
         u2 = u1.copy()
         score = calculate_compatibility(u1, u2)
@@ -391,7 +391,7 @@ class TestEdgeCases:
         u = {
             "hasApartment": 1, "livingLocation": 0, "mcgillResidence": 1,
             "budget": 1, "location": 2,
-            "gender": 0, "genderPreference": 2,
+            "gender": 0, "genderPreference": 3,
             "sleepSchedule": 1, "cleanliness": 1, "noise": 1, "guests": 1, "study": 1,
         }
         score = calculate_compatibility(u, u.copy())
