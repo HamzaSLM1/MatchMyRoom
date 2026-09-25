@@ -580,6 +580,7 @@ function VerificationPage({ email, setPage, onAuth }) {
         });
         if (!syncRes.ok) {
           setError("Account verified but sync failed. Please log in.");
+          setLoading(false);
           setTimeout(() => setPage("login"), 2000);
           return;
         }
