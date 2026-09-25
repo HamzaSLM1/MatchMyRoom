@@ -195,12 +195,29 @@ Corrections to the audit found during validation:
 
 ## 5. Active frontend and error handling
 
-- [ ] Identify real runtime component tree; fix the active app
-- [ ] Consistent API client and configuration
-- [ ] Accurate handling of HTTP errors, outages, malformed responses, timeouts, auth failures
-- [ ] Never show "saved" after a failed request
-- [ ] Loading states recover after failure
-- [ ] No logout loop when backend is temporarily unavailable
+- [x] Identify real runtime component tree; fix the active app — confirmed `src/main.jsx`
+  renders only `App.jsx`; `src/pages/*.jsx` is never imported anywhere (grepped) and is dead
+  code. All fixes in this section target `App.jsx`.
+- [ ] Consistent API client and configuration — `authFetch` (adds the bearer token, handles
+  401) is used for authenticated calls, but a few auth-flow requests (`sync-user`) still use
+  raw `fetch`. Not unified yet.
+- [ ] Accurate handling of HTTP errors, outages, malformed responses, timeouts, auth failures —
+  broad item, not fully audited; see the two specific findings below for what's fixed so far.
+- [x] Never show "saved" after a failed request — audited every write-path `authFetch` call
+  site against `response.ok` (fetch doesn't throw on 4xx/5xx, only on network failure). Found
+  and fixed two real instances: `EditProfile.handleSave` showed the success state and
+  navigated to the dashboard even when the bio/picture request failed; the swipe deck's
+  post-like message prompt (`handleSendPromptMessage`) silently closed and discarded the
+  typed message on any failure. Other write paths (questionnaire submit, swipe like, thread
+  send) already gated correctly on `response.ok`.
+- [~] Loading states recover after failure — the two sites fixed above now reset their loading
+  flag on failure (early `return` + `finally`) instead of hanging or falsely completing; not
+  audited across the rest of the file.
+- [x] No logout loop when backend is temporarily unavailable — `authFetch` forced
+  `signOut()` + `window.location.reload()` on every single 401 response with no dedup; two
+  polling loops (5s conversations, 10s unread count) hitting 401 around the same
+  token-refresh race would each independently trigger their own signOut/reload. Added a
+  module-level guard so only the first 401 acts.
 
 ## 6. Student safety and account lifecycle
 
