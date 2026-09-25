@@ -39,19 +39,15 @@ def init_db():
         print("✅ Non-postgres database: tables created via create_all")
         return
 
-    try:
-        from alembic.config import Config
-        from alembic import command
-        import os
+    from alembic.config import Config
+    from alembic import command
 
-        # Resolve alembic.ini path relative to this file's package root
-        alembic_cfg_path = os.path.join(os.path.dirname(__file__), "..", "alembic.ini")
-        alembic_cfg = Config(os.path.abspath(alembic_cfg_path))
-        command.upgrade(alembic_cfg, "head")
-    except Exception as e:
-        print(f"⚠️  Alembic migration failed ({e}), falling back to create_all...")
-        Base.metadata.create_all(bind=engine)
-        print("✅ Tables created via create_all fallback")
+    # Resolve alembic.ini path relative to this file's package root
+    alembic_cfg_path = os.path.join(os.path.dirname(__file__), "..", "alembic.ini")
+    alembic_cfg = Config(os.path.abspath(alembic_cfg_path))
+    # Let a migration failure propagate: falling back to create_all would
+    # leave the database on a schema Alembic doesn't know about.
+    command.upgrade(alembic_cfg, "head")
 
 
 def get_db():

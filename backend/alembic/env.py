@@ -17,7 +17,11 @@ config = context.config
 database_url = os.environ.get("DATABASE_URL")
 if not database_url:
     raise RuntimeError("DATABASE_URL environment variable is required for Alembic")
-config.set_main_option("sqlalchemy.url", database_url)
+# Config is backed by ConfigParser, which treats "%" as its interpolation
+# escape character. A URL containing a literal "%" (e.g. a URL-escaped
+# password, or a percent-encoded unix-socket host= query param) would
+# otherwise raise "invalid interpolation syntax" here.
+config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
 # Interpret the config file for Python logging.
 if config.config_file_name is not None:
