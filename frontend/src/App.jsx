@@ -35,6 +35,9 @@ class ErrorBoundary extends Component {
 }
 
 // ─── Auth Helper ───
+// Guards against concurrent/repeated 401s (e.g. from the background unread-count
+// or conversation polling) each independently triggering their own signOut+reload.
+let sessionExpiredHandled = false;
 const authFetch = async (url, options = {}, token) => {
   const headers = { ...options.headers };
   // Fetch session directly from Supabase
@@ -43,7 +46,8 @@ const authFetch = async (url, options = {}, token) => {
     headers["Authorization"] = `Bearer ${session.access_token}`;
   }
   const response = await fetch(url, { ...options, headers });
-  if (response.status === 401) {
+  if (response.status === 401 && !sessionExpiredHandled) {
+    sessionExpiredHandled = true;
     await supabase.auth.signOut();
     window.location.reload();
   }
@@ -997,13 +1001,21 @@ function SwipeInterface({ matches, user, setPage, setSelectedMatch, token, setVi
     if (!promptMessage.trim() || !messagePrompt) return;
     setSendingMessage(true);
     try {
-      await authFetch(`${API_BASE}/messages/send?sender_id=${user.user_id}`, {
+      const response = await authFetch(`${API_BASE}/messages/send?sender_id=${user.user_id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ recipient_id: messagePrompt.user_id, content: promptMessage })
       }, token);
+      if (!response.ok) {
+        alert("Couldn't send your message. Please try again.");
+        setSendingMessage(false);
+        return;
+      }
     } catch (err) {
       console.error("Error sending message:", err);
+      alert("Couldn't send your message. Please try again.");
+      setSendingMessage(false);
+      return;
     }
     setSendingMessage(false);
     setPromptMessage("");
@@ -1591,10 +1603,17 @@ function ProfileEditPage({ user, setPage, onProfileUpdate, token }) {
   const handleSave = async () => {
     setLoading(true); setSuccess(false);
     try {
-      if (bio !== undefined) await authFetch(`${API_BASE}/profile/update?user_id=${user.user_id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bio }) }, token);
-      if (profilePicture) { const formData = new FormData(); formData.append("file", profilePicture); await authFetch(`${API_BASE}/profile/upload-picture?user_id=${user.user_id}`, { method: "POST", body: formData }, token); }
+      if (bio !== undefined) {
+        const res = await authFetch(`${API_BASE}/profile/update?user_id=${user.user_id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bio }) }, token);
+        if (!res.ok) { alert("Couldn't save your bio. Please try again."); return; }
+      }
+      if (profilePicture) {
+        const formData = new FormData(); formData.append("file", profilePicture);
+        const res = await authFetch(`${API_BASE}/profile/upload-picture?user_id=${user.user_id}`, { method: "POST", body: formData }, token);
+        if (!res.ok) { alert("Couldn't upload your photo. Please try again."); return; }
+      }
       setSuccess(true); onProfileUpdate(); setTimeout(() => setPage("dashboard"), 1500);
-    } catch (err) { alert("Error saving profile"); } finally { setLoading(false); }
+    } catch (err) { alert("Network error while saving profile. Please try again."); } finally { setLoading(false); }
   };
 
   return (
