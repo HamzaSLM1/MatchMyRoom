@@ -13,7 +13,7 @@ A dual-university roommate matching platform for **McGill** and **Concordia** st
   - Gender preference: 20% (comfort and safety)
   - Lifestyle factors: 25% (sleep, cleanliness, noise, guests, study habits)
 - Pet compatibility bonuses and penalties
-- Only shows matches above 50% compatibility
+- Shows matches above 50% compatibility, plus same-gender profiles at lower scores
 
 ### 👤 User Profiles
 - Profile picture upload with Cloudinary cloud storage

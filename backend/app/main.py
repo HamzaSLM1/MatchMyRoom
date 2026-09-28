@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Request, Query, WebSocket, WebSocketDisconnect
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Request, Query, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session, joinedload
@@ -25,9 +26,9 @@ from .schemas import (
     SwipeRequest, SwipeResponse, SwipeHistoryItem, SendInitialMessageRequest,
     BlockRequest, ReportRequest
 )
-from .matching import calculate_compatibility, calculate_compatibility_breakdown, get_question_text, QUESTION_LABELS
+from .matching import calculate_compatibility, calculate_compatibility_breakdown, get_question_text, same_stated_gender, QUESTION_LABELS
 from .cloudinary_config import init_cloudinary, upload_profile_picture, delete_profile_picture
-from .email_service import send_new_matches_notification, send_like_notification, send_mutual_match_notification
+from .email_service import send_new_matches_notification, send_like_notification, send_mutual_match_notification, send_message_notification
 from .utils import get_blocked_user_ids
 
 # Load environment variables
@@ -43,11 +44,32 @@ ALLOWED_ORIGINS = [
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize database and Cloudinary on startup.
+
+    Migrations are the single source of truth for schema changes (see
+    backend/alembic/versions/). A failure here must stop the app from
+    starting rather than silently falling back to a different schema.
+    """
+    init_db()
+    print("✅ Database initialized")
+    try:
+        init_cloudinary()
+        print("✅ Cloudinary configured")
+    except Exception as e:
+        print(f"⚠️  Cloudinary init failed: {e}")
+    print(f"✅ CORS origins: {ALLOWED_ORIGINS}")
+    yield
+
+
 # Initialize FastAPI app
 app = FastAPI(
     title="MatchMyRoom API",
     description="McGill & Concordia roommate matching platform API",
-    version="2.0.0"
+    version="2.0.0",
+    lifespan=lifespan
 )
 
 # Rate limiter
@@ -152,25 +174,6 @@ def get_optional_user(
         return get_current_user(credentials, db)
     except HTTPException:
         return None
-
-
-# ─── Startup Event ───
-@app.on_event("startup")
-def startup_event():
-    """Initialize database and Cloudinary on startup.
-
-    Migrations are the single source of truth for schema changes (see
-    backend/alembic/versions/). A failure here must stop the app from
-    starting rather than silently falling back to a different schema.
-    """
-    init_db()
-    print("✅ Database initialized")
-    try:
-        init_cloudinary()
-        print("✅ Cloudinary configured")
-    except Exception as e:
-        print(f"⚠️  Cloudinary init failed: {e}")
-    print(f"✅ CORS origins: {ALLOWED_ORIGINS}")
 
 
 # ─── Helper Functions ───
@@ -348,22 +351,36 @@ async def upload_picture(
 
 
 # ─── Private helper: recalculate matches without sending emails (Feature 15) ───
-def _recalculate_matches_for_user(user_id: str, db: Session) -> None:
-    """Recalculate all match scores for a user — silent, no emails, no notifications."""
+def _recalculate_matches_for_user(user_id: str, db: Session) -> int:
+    """Replace a user's saved matches with currently eligible candidates."""
     user_questionnaire = db.query(QuestionnaireResponse).filter(
         QuestionnaireResponse.user_id == user_id
     ).first()
     if not user_questionnaire:
-        return
+        return 0
 
-    # Cap at 500 to prevent OOM on large datasets (mirrors calculate_matches endpoint).
-    # Ordered by id for the same determinism reason — see that endpoint's comment.
+    own_id = user_questionnaire.user_id
+    saved_matches = db.query(Match).filter(
+        (Match.user1_id == own_id) | (Match.user2_id == own_id)
+    ).all()
+    saved_by_other = {}
+    for match in saved_matches:
+        other_id = match.user2_id if match.user1_id == own_id else match.user1_id
+        if other_id == own_id or other_id in saved_by_other:
+            db.delete(match)
+        else:
+            saved_by_other[other_id] = match
+
+    # Stream candidates in batches so newer accounts beyond the first 500 are scored.
     other_users = db.query(User).options(
         joinedload(User.questionnaire)
     ).filter(
         User.id != user_id,
         User.questionnaire_completed == True
-    ).order_by(User.id).limit(500).all()
+    ).order_by(User.id).yield_per(100)
+
+    blocked_ids = get_blocked_user_ids(user_id, db)
+    matches_created = 0
 
     for other_user in other_users:
         if not other_user.questionnaire:
@@ -374,31 +391,34 @@ def _recalculate_matches_for_user(user_id: str, db: Session) -> None:
             other_user.questionnaire.responses
         )
 
-        if score > 50:
-            # Skip if either user has blocked the other
-            blocked_ids = get_blocked_user_ids(user_id, db)
-            if other_user.id in blocked_ids:
-                continue
+        # A same-gender pair normally earns at least 20 points. Zero means a
+        # housing exclusion (e.g. different residences), which must still apply.
+        if score <= 0:
+            continue
 
-            user_a_id = min(user_id, str(other_user.id))
-            user_b_id = max(user_id, str(other_user.id))
+        if not (
+            score > 50 or same_stated_gender(
+                user_questionnaire.responses, other_user.questionnaire.responses
+            )
+        ):
+            continue
 
-            existing_match = db.query(Match).filter(
-                Match.user1_id == user_a_id,
-                Match.user2_id == user_b_id
-            ).first()
+        existing_match = saved_by_other.pop(other_user.id, None)
+        if existing_match:
+            existing_match.compatibility_score = score
+        elif other_user.id not in blocked_ids:
+            db.add(Match(
+                user1_id=min(own_id, other_user.id),
+                user2_id=max(own_id, other_user.id),
+                compatibility_score=score,
+            ))
+            matches_created += 1
 
-            if existing_match:
-                existing_match.compatibility_score = score
-            else:
-                new_match = Match(
-                    user1_id=user_a_id,
-                    user2_id=user_b_id,
-                    compatibility_score=score
-                )
-                db.add(new_match)
+    for obsolete_match in saved_by_other.values():
+        db.delete(obsolete_match)
 
     db.commit()
+    return matches_created
 
 
 # ─── Questionnaire Endpoints (Authenticated) ───
@@ -422,13 +442,14 @@ def submit_questionnaire(
         QuestionnaireResponse.user_id == user_id
     ).first()
 
+    responses = {key: value for key, value in data.responses.items() if key != "genderPreference"}
     if existing:
-        existing.responses = data.responses
+        existing.responses = responses
         existing.completed_at = datetime.now(timezone.utc)
     else:
         questionnaire = QuestionnaireResponse(
             user_id=user_id,
-            responses=data.responses
+            responses=responses
         )
         db.add(questionnaire)
 
@@ -436,9 +457,8 @@ def submit_questionnaire(
     user.questionnaire_completed = True
     db.commit()
 
-    # Feature 15: If this is a retake, silently recalculate matches (no emails)
-    if existing:
-        _recalculate_matches_for_user(user_id, db)
+    # Update both sides' shared match rows even when this is a first submission.
+    _recalculate_matches_for_user(user_id, db)
 
     return {"message": "Questionnaire submitted successfully"}
 
@@ -460,71 +480,9 @@ def calculate_matches(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Get user's questionnaire
-    user_questionnaire = db.query(QuestionnaireResponse).filter(
-        QuestionnaireResponse.user_id == user_id
-    ).first()
-
-    if not user_questionnaire:
+    if not db.query(QuestionnaireResponse).filter(QuestionnaireResponse.user_id == user_id).first():
         raise HTTPException(status_code=400, detail="Please complete the questionnaire first")
-
-    # Get other users with completed questionnaires (eager load questionnaires)
-    # Capped at 500 to prevent OOM on large datasets. Ordered by id so the cap is
-    # deterministic — an unordered LIMIT lets the DB return a different arbitrary
-    # subset on each call, which would make matches flicker in and out for users
-    # near the boundary once the eligible pool exceeds 500. This does not remove
-    # the scale limitation itself: past 500 eligible users, some pairs will never
-    # be scored against each other. A real fix needs batched/paginated processing
-    # of the full candidate pool, which needs a reachable DB to verify (B1).
-    other_users = db.query(User).options(
-        joinedload(User.questionnaire)
-    ).filter(
-        User.id != user_id,
-        User.questionnaire_completed == True
-    ).order_by(User.id).limit(500).all()
-
-    # Calculate compatibility scores
-    matches_created = 0
-    for other_user in other_users:
-        if not other_user.questionnaire:
-            continue
-
-        # Calculate compatibility
-        score = calculate_compatibility(
-            user_questionnaire.responses,
-            other_user.questionnaire.responses
-        )
-
-        # Only store matches with score > 50%
-        if score > 50:
-            # Block check: do not write a match if either user has blocked the other.
-            # Existing matches are hidden at the API layer (not deleted) when a block is created;
-            # this check only prevents new match rows from being written.
-            blocked_ids = get_blocked_user_ids(user_id, db)
-            if other_user.id in blocked_ids:
-                continue
-
-            # Normalize match: always store smaller user_id first
-            user_a_id = min(user_id, str(other_user.id))
-            user_b_id = max(user_id, str(other_user.id))
-
-            existing_match = db.query(Match).filter(
-                Match.user1_id == user_a_id,
-                Match.user2_id == user_b_id
-            ).first()
-
-            if existing_match:
-                existing_match.compatibility_score = score
-            else:
-                new_match = Match(
-                    user1_id=user_a_id,
-                    user2_id=user_b_id,
-                    compatibility_score=score
-                )
-                db.add(new_match)
-                matches_created += 1
-
-    db.commit()
+    matches_created = _recalculate_matches_for_user(user_id, db)
 
     return {"message": "Matches calculated successfully", "matches_found": matches_created}
 
@@ -552,14 +510,15 @@ def get_matches(
 
     # Get matches with eager loading to avoid N+1
     matches = db.query(Match).filter(
-        (Match.user1_id == user_id) | (Match.user2_id == user_id)
+        ((Match.user1_id == user_id) | (Match.user2_id == user_id)),
+        Match.user1_id != Match.user2_id,
     ).order_by(Match.compatibility_score.desc()).offset(skip).limit(limit).all()
 
     result = []
     # Batch load all other user ids, excluding blocked users
     other_user_ids = []
     for match in matches:
-        other_id = match.user2_id if match.user1_id == user_id else match.user1_id
+        other_id = match.user2_id if str(match.user1_id) == user_id else match.user1_id
         if other_id not in blocked_ids:
             other_user_ids.append(other_id)
 
@@ -576,7 +535,9 @@ def get_matches(
         questionnaire_map = {q.user_id: q for q in questionnaires}
 
     for match in matches:
-        other_user_id = match.user2_id if match.user1_id == user_id else match.user1_id
+        other_user_id = match.user2_id if str(match.user1_id) == user_id else match.user1_id
+        if str(other_user_id) == user_id:
+            continue
         # Skip blocked users (bidirectional)
         if other_user_id in blocked_ids:
             continue
@@ -895,6 +856,7 @@ def get_swipe_history(
 @limiter.limit("30/minute")
 async def send_message(
     request: Request,
+    background_tasks: BackgroundTasks,
     sender_id: str,
     data: MessageSendRequest,
     db: Session = Depends(get_db),
@@ -928,6 +890,10 @@ async def send_message(
     db.add(message)
     db.commit()
     db.refresh(message)
+
+    background_tasks.add_task(
+        send_message_notification, recipient.email, recipient.name, current_user.name
+    )
 
     # Push via WebSocket if recipient is connected
     await ws_manager.send_to_user(data.recipient_id, {
@@ -1249,7 +1215,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "mcgill",
             "program": "Engineering",
             "bio": "Third-year engineering student who loves hiking and cooking. Looking for a clean, quiet roommate.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 1, "genderPreference": 3, "age": 1, "program": 2, "budget": 1, "location": 0, "religion": 5, "sleepSchedule": 2, "cleanliness": 1, "noise": 0, "guests": 1, "study": 2, "dietary": 0, "workFromHome": 1, "pets": 2, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 1, "age": 1, "program": 2, "budget": 1, "location": 0, "religion": 5, "sleepSchedule": 2, "cleanliness": 1, "noise": 0, "guests": 1, "study": 2, "dietary": 0, "workFromHome": 1, "pets": 2, "language": 0, "moveIn": 0}
         },
         {
             "name": "Liam Chen",
@@ -1257,7 +1223,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Commerce/Management",
             "bio": "Business student and gym enthusiast. Social but respectful of personal space.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 0, "program": 3, "budget": 2, "location": 2, "religion": 0, "sleepSchedule": 1, "cleanliness": 1, "noise": 2, "guests": 2, "study": 1, "dietary": 0, "workFromHome": 0, "pets": 0, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "age": 0, "program": 3, "budget": 2, "location": 2, "religion": 0, "sleepSchedule": 1, "cleanliness": 1, "noise": 2, "guests": 2, "study": 1, "dietary": 0, "workFromHome": 0, "pets": 0, "language": 0, "moveIn": 0}
         },
         {
             "name": "Sophia Patel",
@@ -1265,7 +1231,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "mcgill",
             "program": "Science",
             "bio": "Pre-med student who studies a lot. Looking for someone serious about academics.",
-            "responses": {"hasApartment": 1, "livingLocation": 0, "mcgillResidence": 1, "gender": 1, "genderPreference": 1, "age": 1, "program": 1, "budget": 0, "location": 0, "religion": 4, "sleepSchedule": 0, "cleanliness": 0, "noise": 0, "guests": 0, "study": 0, "dietary": 1, "workFromHome": 0, "pets": 3, "language": 2, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 0, "mcgillResidence": 1, "gender": 1, "age": 1, "program": 1, "budget": 0, "location": 0, "religion": 4, "sleepSchedule": 0, "cleanliness": 0, "noise": 0, "guests": 0, "study": 0, "dietary": 1, "workFromHome": 0, "pets": 3, "language": 2, "moveIn": 0}
         },
         {
             "name": "Noah Tremblay",
@@ -1273,7 +1239,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Arts",
             "bio": "Art history major and part-time barista. Love music, museums, and good conversations.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 1, "program": 0, "budget": 1, "location": 1, "religion": 0, "sleepSchedule": 2, "cleanliness": 2, "noise": 1, "guests": 2, "study": 1, "dietary": 2, "workFromHome": 2, "pets": 2, "language": 2, "moveIn": 1}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "age": 1, "program": 0, "budget": 1, "location": 1, "religion": 0, "sleepSchedule": 2, "cleanliness": 2, "noise": 1, "guests": 2, "study": 1, "dietary": 2, "workFromHome": 2, "pets": 2, "language": 2, "moveIn": 1}
         },
         {
             "name": "Olivia Martinez",
@@ -1281,7 +1247,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "mcgill",
             "program": "Law",
             "bio": "Law student looking for a quiet study environment. I'm organized and respectful.",
-            "responses": {"hasApartment": 1, "livingLocation": 0, "mcgillResidence": 1, "gender": 1, "genderPreference": 1, "age": 2, "program": 5, "budget": 2, "location": 0, "religion": 1, "sleepSchedule": 0, "cleanliness": 0, "noise": 0, "guests": 0, "study": 0, "dietary": 0, "workFromHome": 1, "pets": 0, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 0, "mcgillResidence": 1, "gender": 1, "age": 2, "program": 5, "budget": 2, "location": 0, "religion": 1, "sleepSchedule": 0, "cleanliness": 0, "noise": 0, "guests": 0, "study": 0, "dietary": 0, "workFromHome": 1, "pets": 0, "language": 0, "moveIn": 0}
         },
         {
             "name": "Ethan Kim",
@@ -1289,7 +1255,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Engineering",
             "bio": "Computer engineering student and gamer. Night owl who's chill and easy-going.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 0, "program": 2, "budget": 1, "location": 4, "religion": 0, "sleepSchedule": 1, "cleanliness": 2, "noise": 1, "guests": 1, "study": 2, "dietary": 0, "workFromHome": 3, "pets": 2, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "age": 0, "program": 2, "budget": 1, "location": 4, "religion": 0, "sleepSchedule": 1, "cleanliness": 2, "noise": 1, "guests": 1, "study": 2, "dietary": 0, "workFromHome": 3, "pets": 2, "language": 0, "moveIn": 0}
         },
         {
             "name": "Ava Leblanc",
@@ -1297,7 +1263,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "mcgill",
             "program": "Music",
             "bio": "Music performance student. I practice piano daily but use headphones! Love cats.",
-            "responses": {"hasApartment": 1, "livingLocation": 0, "mcgillResidence": 0, "gender": 1, "genderPreference": 3, "age": 0, "program": 6, "budget": 0, "location": 1, "religion": 0, "sleepSchedule": 2, "cleanliness": 1, "noise": 1, "guests": 1, "study": 2, "dietary": 2, "workFromHome": 1, "pets": 1, "language": 2, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 0, "mcgillResidence": 0, "gender": 1, "age": 0, "program": 6, "budget": 0, "location": 1, "religion": 0, "sleepSchedule": 2, "cleanliness": 1, "noise": 1, "guests": 1, "study": 2, "dietary": 2, "workFromHome": 1, "pets": 1, "language": 2, "moveIn": 0}
         },
         {
             "name": "Mason Williams",
@@ -1305,7 +1271,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Science",
             "bio": "Biology major and fitness enthusiast. Early riser who keeps things clean and organized.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 1, "program": 1, "budget": 1, "location": 3, "religion": 1, "sleepSchedule": 0, "cleanliness": 0, "noise": 1, "guests": 1, "study": 1, "dietary": 3, "workFromHome": 0, "pets": 2, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "age": 1, "program": 1, "budget": 1, "location": 3, "religion": 1, "sleepSchedule": 0, "cleanliness": 0, "noise": 1, "guests": 1, "study": 1, "dietary": 3, "workFromHome": 0, "pets": 2, "language": 0, "moveIn": 0}
         },
         {
             "name": "Isabella Nguyen",
@@ -1313,7 +1279,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "mcgill",
             "program": "Commerce/Management",
             "bio": "Marketing major and social butterfly. Love hosting small gatherings and trying new recipes.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 1, "genderPreference": 3, "age": 1, "program": 3, "budget": 2, "location": 2, "religion": 2, "sleepSchedule": 2, "cleanliness": 1, "noise": 2, "guests": 3, "study": 1, "dietary": 0, "workFromHome": 2, "pets": 2, "language": 0, "moveIn": 1}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 1, "age": 1, "program": 3, "budget": 2, "location": 2, "religion": 2, "sleepSchedule": 2, "cleanliness": 1, "noise": 2, "guests": 3, "study": 1, "dietary": 0, "workFromHome": 2, "pets": 2, "language": 0, "moveIn": 1}
         },
         {
             "name": "James Anderson",
@@ -1321,7 +1287,7 @@ def create_fake_users(request: Request, db: Session = Depends(get_db)):
             "university": "concordia",
             "program": "Education",
             "bio": "Education student and aspiring teacher. Friendly, responsible, and drama-free.",
-            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "genderPreference": 3, "age": 2, "program": 7, "budget": 1, "location": 0, "religion": 1, "sleepSchedule": 0, "cleanliness": 1, "noise": 1, "guests": 2, "study": 2, "dietary": 0, "workFromHome": 1, "pets": 2, "language": 0, "moveIn": 0}
+            "responses": {"hasApartment": 1, "livingLocation": 1, "gender": 0, "age": 2, "program": 7, "budget": 1, "location": 0, "religion": 1, "sleepSchedule": 0, "cleanliness": 1, "noise": 1, "guests": 2, "study": 2, "dietary": 0, "workFromHome": 1, "pets": 2, "language": 0, "moveIn": 0}
         }
     ]
 

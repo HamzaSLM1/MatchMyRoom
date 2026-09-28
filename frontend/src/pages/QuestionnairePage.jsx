@@ -50,10 +50,12 @@ export default function QuestionnairePage({ user, token, onComplete }) {
     } else {
       setSubmitting(true);
       try {
-        const response = await authFetch(`/api/questionnaire/submit?user_id=${user.user_id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ responses: updated }) }, token);
+        const currentAnswers = Object.fromEntries(newVisibleQuestions
+          .filter(question => updated[question.id] !== undefined)
+          .map(question => [question.id, updated[question.id]]));
+        const response = await authFetch(`/api/questionnaire/submit?user_id=${user.user_id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ responses: currentAnswers }) }, token);
         if (response.ok) {
-          await authFetch(`/api/matches/calculate?user_id=${user.user_id}`, { method: "POST" }, token);
-          onComplete(updated);
+          onComplete(currentAnswers);
           navigate("/profile-setup");
         } else { alert("Error submitting questionnaire"); setSubmitting(false); }
       } catch (err) { alert("Network error"); setSubmitting(false); }

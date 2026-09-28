@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from backend.app.matching import (
     calculate_compatibility,
+    calculate_compatibility_breakdown,
     _gender_score,
     _lifestyle_score,
     _pet_score,
@@ -17,34 +18,27 @@ from backend.app.matching import (
 # ────────────────────────────────────────────
 
 class TestGenderScore:
-    def test_both_no_preference(self):
-        assert _gender_score({"genderPreference": 3}, {"genderPreference": 3}) == 20
+    def test_same_gender_ignores_old_preference_answers(self):
+        assert _gender_score({"gender": 0, "genderPreference": 1},
+                             {"gender": 0, "genderPreference": 2}) == 20
 
-    def test_mutual_match(self):
-        # User1 is male(0), prefers female(1); User2 is female(1), prefers male(0)
-        u1 = {"gender": 0, "genderPreference": 1}
-        u2 = {"gender": 1, "genderPreference": 0}
-        assert _gender_score(u1, u2) == 20
+    def test_same_gender(self):
+        assert _gender_score({"gender": 0}, {"gender": 0}) == 20
+        assert _gender_score({"gender": 2}, {"gender": 2}) == 20
 
-    def test_one_no_preference_other_matches(self):
-        u1 = {"gender": 0, "genderPreference": 3}
-        u2 = {"gender": 1, "genderPreference": 0}
-        assert _gender_score(u1, u2) == 20
+    def test_different_gender(self):
+        assert _gender_score({"gender": 0}, {"gender": 1}) == 0
 
-    def test_one_sided_match(self):
-        # User1 prefers female(1), User2 IS female(1) but prefers female(1) — user1 is male(0)
-        u1 = {"gender": 0, "genderPreference": 1}
-        u2 = {"gender": 1, "genderPreference": 1}
-        assert _gender_score(u1, u2) == 10
+    def test_missing_or_undisclosed_gender(self):
+        assert _gender_score({}, {}) == 0
+        assert _gender_score({"gender": 3}, {"gender": 3}) == 0
 
-    def test_complete_mismatch(self):
-        u1 = {"gender": 0, "genderPreference": 1}
-        u2 = {"gender": 0, "genderPreference": 1}
-        assert _gender_score(u1, u2) == 0
 
-    def test_defaults_when_missing(self):
-        # Defaults: gender=0, genderPreference=3 (no preference)
-        assert _gender_score({}, {}) == 20
+def test_breakdown_uses_actual_score_for_different_residences():
+    first = {"livingLocation": 0, "mcgillResidence": 0, "gender": 0}
+    second = {"livingLocation": 0, "mcgillResidence": 1, "gender": 0}
+    assert calculate_compatibility(first, second) == 0
+    assert calculate_compatibility_breakdown(first, second)["overall_score"] == 0
 
 
 # ────────────────────────────────────────────

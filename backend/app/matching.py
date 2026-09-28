@@ -1,24 +1,15 @@
 from typing import Dict
 
 
-GENDER_PREFERENCE_NO_PREFERENCE = 3  # index of "No preference" in genderPreference options
-
-
 def _gender_score(user1_responses: Dict, user2_responses: Dict) -> float:
-    """Returns 0, 10, or 20 points for gender preference compatibility."""
-    user1_gender = user1_responses.get("gender", 0)
-    user2_gender = user2_responses.get("gender", 0)
-    user1_pref = user1_responses.get("genderPreference", GENDER_PREFERENCE_NO_PREFERENCE)
-    user2_pref = user2_responses.get("genderPreference", GENDER_PREFERENCE_NO_PREFERENCE)
-    no_pref = GENDER_PREFERENCE_NO_PREFERENCE
+    """Award points for the same stated gender; ignore legacy preference answers."""
+    return 20 if same_stated_gender(user1_responses, user2_responses) else 0
 
-    if user1_pref == no_pref and user2_pref == no_pref:
-        return 20
-    elif (user1_pref == no_pref or user1_pref == user2_gender) and (user2_pref == no_pref or user2_pref == user1_gender):
-        return 20
-    elif (user1_pref != no_pref and user1_pref == user2_gender) or (user2_pref != no_pref and user2_pref == user1_gender):
-        return 10
-    return 0
+
+def same_stated_gender(user1_responses: Dict, user2_responses: Dict) -> bool:
+    """Only explicit Male, Female, or Non-binary answers count as the same gender."""
+    gender = user1_responses.get("gender")
+    return gender in (0, 1, 2) and gender == user2_responses.get("gender")
 
 
 def _lifestyle_score(user1_responses: Dict, user2_responses: Dict) -> float:
@@ -102,7 +93,7 @@ def calculate_compatibility(user1_responses: Dict[str, int], user2_responses: Di
         else:
             score += 15  # Missing data — partial credit
 
-        # Gender preference (20 points)
+        # Same stated gender (20 points)
         score += _gender_score(user1_responses, user2_responses)
 
         # Lifestyle (20 points)
@@ -175,7 +166,7 @@ def calculate_compatibility(user1_responses: Dict[str, int], user2_responses: Di
     else:
         score += 25
 
-    # Gender preference (20 points)
+    # Same stated gender (20 points)
     score += _gender_score(user1_responses, user2_responses)
 
     # Lifestyle (20 points) — uses _lifestyle_score() for consistent None-handling
@@ -213,7 +204,7 @@ def calculate_compatibility_breakdown(user1_responses: Dict, user2_responses: Di
             "categories": [
                 {"name": "Budget", "icon": "💰", "score": 0, "max_score": 30, "percentage": 0, "status": "mismatch", "your_value": "Has apartment", "their_value": "Has apartment"},
                 {"name": "Location", "icon": "📍", "score": 0, "max_score": 25, "percentage": 0, "status": "mismatch", "your_value": "N/A", "their_value": "N/A"},
-                {"name": "Gender Preference", "icon": "👤", "score": 0, "max_score": 20, "percentage": 0, "status": "mismatch", "your_value": "N/A", "their_value": "N/A"},
+                {"name": "Gender", "icon": "👤", "score": 0, "max_score": 20, "percentage": 0, "status": "mismatch", "your_value": "N/A", "their_value": "N/A"},
                 {"name": "Lifestyle", "icon": "🌙", "score": 0, "max_score": 20, "percentage": 0, "status": "mismatch", "subcategories": []},
                 {"name": "Pets", "icon": "🐾", "score": 0, "max_score": 5, "percentage": 0, "status": "mismatch", "your_value": "N/A", "their_value": "N/A"},
             ]
@@ -334,19 +325,19 @@ def calculate_compatibility_breakdown(user1_responses: Dict, user2_responses: Di
         "their_value": their_loc,
     })
 
-    # ─── Gender Preference ───
+    # ─── Gender ───
     gender_score = _gender_score(user1_responses, user2_responses)
-    u1_gp = user1_responses.get("genderPreference", GENDER_PREFERENCE_NO_PREFERENCE)
-    u2_gp = user2_responses.get("genderPreference", GENDER_PREFERENCE_NO_PREFERENCE)
+    u1_gender = user1_responses.get("gender")
+    u2_gender = user2_responses.get("gender")
     categories.append({
-        "name": "Gender Preference",
+        "name": "Gender",
         "icon": "👤",
         "score": gender_score,
         "max_score": 20,
         "percentage": round(gender_score / 20 * 100),
         "status": get_status(gender_score, 20),
-        "your_value": get_question_text("genderPreference", u1_gp),
-        "their_value": get_question_text("genderPreference", u2_gp),
+        "your_value": get_question_text("gender", u1_gender) if u1_gender is not None else "Not specified",
+        "their_value": get_question_text("gender", u2_gender) if u2_gender is not None else "Not specified",
     })
 
     # ─── Lifestyle ───
@@ -394,7 +385,7 @@ def calculate_compatibility_breakdown(user1_responses: Dict, user2_responses: Di
         "their_value": get_question_text("pets", u2_pets) if u2_pets is not None else "Not specified",
     })
 
-    overall_score = round(max(0, min(100, budget_score + location_score + gender_score + lifestyle_score + pet_score)), 1)
+    overall_score = calculate_compatibility(user1_responses, user2_responses)
     return {"overall_score": overall_score, "categories": categories}
 
 
@@ -406,7 +397,6 @@ QUESTION_LABELS = {
     "concordiaResidence": "Concordia residence",
     "year": "Year",
     "gender": "Gender",
-    "genderPreference": "Preferred roommate gender",
     "age": "Age",
     "program": "Program",
     "budget": "Budget",
@@ -443,7 +433,6 @@ def get_question_text(question_id: str, option_index: int) -> str:
         "concordiaResidence": ["Grey Nuns Residence", "Hingston Hall"],
         "year": ["U0", "U1", "U2", "U3", "U4", "Masters", "PhD", "Other"],
         "gender": ["Male", "Female", "Non-binary", "Prefer not to say"],
-        "genderPreference": ["Male", "Female", "Non-binary", "No preference"],
         "age": ["18-20", "21-23", "24-26", "27+"],
         "program": ["Arts", "Science", "Engineering", "Commerce/Management", "Medicine", "Law", "Education", "Music", "Other"],
         "budget": ["$700–$1000", "$1000–$1300", "$1300–$1500", "$1500+", "Custom amount"],

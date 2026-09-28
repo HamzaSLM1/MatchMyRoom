@@ -25,8 +25,7 @@ const questions = [
   { id: "year", question: "What year are you in?", icon: "📆", options: ["U0", "U1", "U2", "U3", "U4", "Masters", "PhD", "Other"] },
 
   // Dealbreakers
-  { id: "gender", question: "What is your gender?", icon: "👤", options: ["Male", "Female", "Prefer not to say"] },
-  { id: "genderPreference", question: "Preferred roommate gender?", icon: "🤝", options: ["Male", "Female", "No preference"] },
+  { id: "gender", question: "What is your gender?", icon: "👤", options: ["Male", "Female", "Non-binary", "Prefer not to say"] },
   { id: "age", question: "What is your age?", icon: "🎂", options: ["18-20", "21-23", "24-26", "27+"] },
   { id: "program", question: "What are you studying?", icon: "🎓", options: ["Arts", "Science", "Engineering", "Commerce/Management", "Medicine", "Law", "Education", "Music", "Other"], allowCustom: true },
 

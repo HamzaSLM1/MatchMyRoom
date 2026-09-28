@@ -279,24 +279,17 @@ class TestBlockFiltering:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestMatchingBugFixes:
-    def test_no_preference_gender_default_is_3(self):
-        """genderPreference default (GENDER_PREFERENCE_NO_PREFERENCE) is 3, matching the
-        4-option ["Male", "Female", "Non-binary", "No preference"] list in matching.py."""
-        from backend.app.matching import _gender_score, GENDER_PREFERENCE_NO_PREFERENCE
-        assert GENDER_PREFERENCE_NO_PREFERENCE == 3
-        # Both users with no genderPreference key — should default to 3 (No preference)
-        # and get full 20 points
-        score = _gender_score({}, {})
-        assert score == 20
+    def test_missing_gender_does_not_award_points(self):
+        from backend.app.matching import _gender_score
+        assert _gender_score({}, {}) == 0
 
-    def test_no_preference_explicit_both_same(self):
-        """Both users explicitly set genderPreference=3 (No preference) → 20 points."""
+    def test_legacy_gender_preference_is_ignored(self):
         from backend.app.matching import _gender_score
         score = _gender_score(
             {"gender": 0, "genderPreference": 3},
             {"gender": 1, "genderPreference": 3}
         )
-        assert score == 20
+        assert score == 0
 
     def test_lifestyle_score_case3_uses_helper(self):
         """Bug 1 fix: Case 3 lifestyle scoring uses _lifestyle_score() helper for None-handling."""
@@ -313,8 +306,8 @@ class TestMatchingBugFixes:
             "gender": 1, "genderPreference": 3
         }
         score = calculate_compatibility(r1, r2)
-        # With matching budget(30), location(25), gender(20), lifestyle(20), pets partial = high score
-        assert score > 80
+        # Matching budget(30), location(25), lifestyle(20), and partial pets(2).
+        assert score == 77
 
     def test_lifestyle_score_case3_none_handling(self):
         """Bug 1 fix: None lifestyle values in Case 3 are handled correctly (not counted as match)."""

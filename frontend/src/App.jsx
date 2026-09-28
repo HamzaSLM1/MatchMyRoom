@@ -240,7 +240,6 @@ const questions = [
 
   // Dealbreakers
   { id: "gender", question: "What is your gender?", icon: "👤", options: ["Male", "Female", "Non-binary", "Prefer not to say"] },
-  { id: "genderPreference", question: "Preferred roommate gender?", icon: "🤝", options: ["Male", "Female", "Non-binary", "No preference"] },
   { id: "age", question: "What is your age?", icon: "🎂", options: ["18-20", "21-23", "24-26", "27+"] },
   { id: "program", question: "What are you studying?", icon: "🎓", options: ["Arts", "Science", "Engineering", "Commerce/Management", "Medicine", "Law", "Education", "Music", "Other"], allowCustom: true },
 

@@ -5,6 +5,7 @@ Uses Resend API (preferred) with Gmail SMTP fallback
 
 import os
 import smtplib
+from html import escape
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
@@ -34,6 +35,18 @@ def send_email(to_email: str, subject: str, html_content: str) -> bool:
 
     print("⚠️  Email not configured. Set RESEND_API_KEY in Railway env vars.")
     return False
+
+
+def send_message_notification(user_email: str, user_name: str, sender_name: str) -> bool:
+    """Tell a recipient about a new message without exposing its contents in email."""
+    safe_user = escape(user_name)
+    safe_sender = escape(sender_name)
+    html_content = (
+        f"<h2>Hi {safe_user},</h2>"
+        f"<p>{safe_sender} sent you a message on MatchMyRoom.</p>"
+        f'<p><a href="{escape(APP_URL, quote=True)}">Read your message</a></p>'
+    )
+    return send_email(user_email, "You have a new message on MatchMyRoom", html_content)
 
 
 def _send_via_resend(to_email: str, subject: str, html_content: str) -> bool:

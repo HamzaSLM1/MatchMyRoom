@@ -2,10 +2,23 @@
 
 import uuid
 import pytest
+from unittest.mock import patch
 from tests.conftest import auth_header
 
 
 class TestSendMessage:
+    def test_send_message_emails_recipient(self, client, create_verified_user):
+        sender = create_verified_user(name="Sender", email="sender@mcgill.ca")
+        recipient = create_verified_user(name="Receiver", email="receiver@mcgill.ca")
+        with patch("backend.app.main.send_message_notification") as notify:
+            response = client.post(
+                f"/api/messages/send?sender_id={sender.id}",
+                json={"recipient_id": str(recipient.id), "content": "Hello"},
+                headers=auth_header(sender.id, sender.email),
+            )
+        assert response.status_code == 200
+        notify.assert_called_once_with(recipient.email, recipient.name, sender.name)
+
     def test_send_message(self, client, create_verified_user):
         u1 = create_verified_user(name="Sender", email="sender@mcgill.ca")
         u2 = create_verified_user(name="Receiver", email="receiver@mcgill.ca")

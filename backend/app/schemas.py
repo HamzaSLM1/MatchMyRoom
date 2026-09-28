@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, field_validator, Field
+from pydantic import BaseModel, EmailStr, field_validator, Field, ConfigDict
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime
 
@@ -23,8 +23,7 @@ class UserProfile(BaseModel):
     last_seen: Optional[datetime] = None  # Feature 3: last seen tracking
     is_online: Optional[bool] = False     # Feature 3: True when last_seen is None and WS connected
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ─── Questionnaire Schemas ───
@@ -38,8 +37,7 @@ class QuestionnaireResponse(BaseModel):
     responses: Dict[str, Any]
     completed_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ─── Match Schemas ───
@@ -85,8 +83,7 @@ class MessageResponse(BaseModel):
     sent_at: datetime
     read: bool
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ConversationPreview(BaseModel):
@@ -119,8 +116,7 @@ class SwipeHistoryItem(BaseModel):
     is_mutual: bool
     swiped_at: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SendInitialMessageRequest(BaseModel):
