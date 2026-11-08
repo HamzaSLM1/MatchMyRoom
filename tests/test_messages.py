@@ -247,3 +247,47 @@ class TestMarkMessageRead:
             headers=auth_header(u.id, u.email),
         )
         assert resp.status_code == 404
+
+
+class TestWebSocket:
+    @pytest.fixture()
+    def ws_db(self, db_session):
+        # The WebSocket handler opens sessions with next(get_db()), bypassing dependency_overrides,
+        # and closes them, which detaches ORM objects. Tests hold plain ids, not instances.
+        with patch("backend.app.main.get_db", side_effect=lambda: iter([db_session])):
+            yield db_session
+
+    def _user(self, create_verified_user, name, email):
+        u = create_verified_user(name=name, email=email)
+        return u.id, u.email
+
+    def _connect(self, client, user_id, email):
+        return client.websocket_connect(f"/api/ws/{user_id}?token=faketoken:{user_id}:{email}")
+
+    def test_mark_read_marks_own_message(self, client, ws_db, create_verified_user):
+        from backend.app.models import Message
+
+        sender_id, _ = self._user(create_verified_user, "S", "ws-s@mcgill.ca")
+        me_id, me_email = self._user(create_verified_user, "R", "ws-r@mcgill.ca")
+        msg = Message(sender_id=sender_id, recipient_id=me_id, content="hi")
+        ws_db.add(msg)
+        ws_db.commit()
+        msg_id = msg.id
+
+        with self._connect(client, me_id, me_email) as ws:
+            ws.send_json({"type": "mark_read", "message_id": msg_id})
+            ws.send_json({"type": "typing", "recipient_id": "not-a-uuid"})
+        assert ws_db.get(Message, msg_id).read is True
+
+    def test_message_is_delivered_to_connected_recipient(self, client, ws_db, create_verified_user):
+        sender_id, sender_email = self._user(create_verified_user, "Sam", "ws-a@mcgill.ca")
+        recipient_id, recipient_email = self._user(create_verified_user, "Rae", "ws-b@mcgill.ca")
+
+        with self._connect(client, recipient_id, recipient_email) as ws_r, \
+                self._connect(client, sender_id, sender_email) as ws_s:
+            ws_s.send_json({"type": "message", "recipient_id": str(recipient_id), "content": "yo"})
+            assert ws_s.receive_json()["type"] == "message_sent"
+            pushed = ws_r.receive_json()
+        assert pushed["type"] == "new_message"
+        assert pushed["sender_id"] == str(sender_id)
+        assert pushed["content"] == "yo"

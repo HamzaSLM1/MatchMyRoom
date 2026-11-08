@@ -2,6 +2,7 @@ import cloudinary
 import cloudinary.uploader
 import os
 from typing import Optional
+from uuid import UUID
 
 
 def init_cloudinary():
@@ -17,7 +18,7 @@ def init_cloudinary():
     )
 
 
-async def upload_profile_picture(file_content: bytes, user_id: int) -> tuple[Optional[str], Optional[str]]:
+async def upload_profile_picture(file_content: bytes, user_id: UUID) -> tuple[Optional[str], Optional[str]]:
     """
     Upload a profile picture to Cloudinary.
 
@@ -78,7 +79,7 @@ async def upload_profile_picture(file_content: bytes, user_id: int) -> tuple[Opt
         return None, None
 
 
-def delete_profile_picture(user_id: int) -> bool:
+def delete_profile_picture(user_id: UUID) -> bool:
     """
     Delete a user's profile picture from Cloudinary.
 
