@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, Component } from "react";
+import { useState, useEffect, useRef, useCallback, Component } from "react";
 import { supabase } from "./supabaseClient";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -38,7 +38,7 @@ class ErrorBoundary extends Component {
 // Guards against concurrent/repeated 401s (e.g. from the background unread-count
 // or conversation polling) each independently triggering their own signOut+reload.
 let sessionExpiredHandled = false;
-const authFetch = async (url, options = {}, token) => {
+const authFetch = async (url, options = {}) => {
   const headers = { ...options.headers };
   // Fetch session directly from Supabase
   const { data: { session } } = await supabase.auth.getSession();
@@ -301,7 +301,7 @@ function Logo({ size = 28, university = "mcgill" }) {
   );
 }
 
-function NavBar({ page, setPage, isLoggedIn, user, unreadCount = 0 }) {
+function NavBar({ setPage, isLoggedIn, user, unreadCount = 0 }) {
   return (
     <nav style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 100, padding: "16px 32px", background: "rgba(12,10,9,0.92)", backdropFilter: "blur(24px) saturate(180%)", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", boxShadow: "0 4px 24px rgba(0,0,0,0.2)" }}>
       <div onClick={() => setPage("landing")} style={{ transition: "transform 0.2s ease" }} onMouseEnter={(e) => e.currentTarget.style.transform = "scale(1.05)"} onMouseLeave={(e) => e.currentTarget.style.transform = "scale(1)"}><Logo university={user?.university} /></div>
@@ -345,7 +345,7 @@ function LandingPage({ setPage }) {
           Find your <span style={{ background: `linear-gradient(135deg, ${C.mcgillRed}, ${C.concordiaMaroon})`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>perfect</span><br />roommate
         </h1>
         <p className="anim-fade-up" style={{ fontSize: 19, color: C.textMuted, maxWidth: 520, lineHeight: 1.7, marginBottom: 48, animationDelay: "0.35s" }}>
-          Answer a quick questionnaire about your lifestyle, and we'll match you with compatible students at McGill or Concordia looking for roommates in Montréal.
+          Answer a quick questionnaire about your lifestyle, and we’ll match you with compatible students at McGill or Concordia looking for roommates in Montréal.
         </p>
         <div className="anim-fade-up" style={{ display: "flex", gap: 16, flexWrap: "wrap", justifyContent: "center", animationDelay: "0.5s" }}>
           <button className="btn-primary" style={{ padding: "16px 40px", fontSize: 16 }} onClick={() => setPage("signup")}>Get matched →</button>
@@ -395,14 +395,14 @@ function TermsOfServicePage({ setPage }) {
             <li style={{ marginBottom: 8 }}>Treat other users with respect and courtesy in all communications</li>
             <li style={{ marginBottom: 8 }}>Not use the platform for harassment, discrimination, or any unlawful purpose</li>
             <li style={{ marginBottom: 8 }}>Not impersonate another person or misrepresent your identity</li>
-            <li style={{ marginBottom: 8 }}>Not share other users' personal information without their consent</li>
+            <li style={{ marginBottom: 8 }}>Not share other users’ personal information without their consent</li>
           </ul>
 
           <h2 style={{ fontFamily: font.display, fontSize: 20, fontWeight: 700, marginBottom: 12, marginTop: 28 }}>5. Limitation of Liability</h2>
-          <p style={{ marginBottom: 20, color: C.textMuted }}>MatchMyRoom provides roommate suggestions based on self-reported preferences. We make <strong>no guarantees</strong> about the accuracy of user profiles, the quality of matches, or the outcome of any roommate arrangement. We are not responsible for verifying users' identities, backgrounds, or the accuracy of the information they provide. <strong>You use this platform and act on its suggestions entirely at your own risk.</strong></p>
+          <p style={{ marginBottom: 20, color: C.textMuted }}>MatchMyRoom provides roommate suggestions based on self-reported preferences. We make <strong>no guarantees</strong> about the accuracy of user profiles, the quality of matches, or the outcome of any roommate arrangement. We are not responsible for verifying users’ identities, backgrounds, or the accuracy of the information they provide. <strong>You use this platform and act on its suggestions entirely at your own risk.</strong></p>
 
           <h2 style={{ fontFamily: font.display, fontSize: 20, fontWeight: 700, marginBottom: 12, marginTop: 28 }}>6. Privacy & Data</h2>
-          <p style={{ marginBottom: 20, color: C.textMuted }}>Your questionnaire responses and profile information are used solely for generating roommate matches and improving the platform experience. We do not sell your personal data to third parties. Profile pictures are stored on Cloudinary's secure servers. You may delete your account and all associated data at any time.</p>
+          <p style={{ marginBottom: 20, color: C.textMuted }}>Your questionnaire responses and profile information are used solely for generating roommate matches and improving the platform experience. We do not sell your personal data to third parties. Profile pictures are stored on Cloudinary’s secure servers. You may delete your account and all associated data at any time.</p>
 
           <h2 style={{ fontFamily: font.display, fontSize: 20, fontWeight: 700, marginBottom: 12, marginTop: 28 }}>7. Account Termination</h2>
           <p style={{ marginBottom: 20, color: C.textMuted }}>We reserve the right to suspend or terminate accounts that violate these Terms of Service, including but not limited to accounts that engage in harassment, post fraudulent content, or are reported by multiple users. You may delete your own account at any time through your profile settings.</p>
@@ -672,7 +672,7 @@ function VerificationPage({ email, setPage, onAuth, onCancel }) {
             <strong style={{ color: C.accent }}>{email}</strong>
           </p>
           <p style={{ color: C.textMuted, fontSize: 13, marginTop: 12, padding: "10px 16px", background: C.surfaceLight, borderRadius: 8 }}>
-            <strong style={{ color: C.text }}>📬 Check your junk/spam folder</strong> if you don't see it in your inbox
+            <strong style={{ color: C.text }}>📬 Check your junk/spam folder</strong> if you don’t see it in your inbox
           </p>
         </div>
 
@@ -722,7 +722,7 @@ function VerificationPage({ email, setPage, onAuth, onCancel }) {
 
             <div style={{ textAlign: "center", marginTop: 24 }}>
               <p style={{ fontSize: 13, color: C.textMuted }}>
-                Didn't receive the code?
+                Didn’t receive the code?
               </p>
               <button
                 onClick={handleResend}
@@ -758,7 +758,7 @@ function VerificationPage({ email, setPage, onAuth, onCancel }) {
 }
 
 
-function QuestionnairePage({ setPage, onComplete, user, token }) {
+function QuestionnairePage({ onComplete, user }) {
   const [current, setCurrent] = useState(0);
   const [answers, setAnswers] = useState({});
   const [selected, setSelected] = useState(null);
@@ -805,9 +805,9 @@ function QuestionnairePage({ setPage, onComplete, user, token }) {
     } else {
       setSubmitting(true);
       try {
-        const response = await authFetch(`${API_BASE}/questionnaire/submit?user_id=${user.user_id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ responses: updated }) }, token);
+        const response = await authFetch(`${API_BASE}/questionnaire/submit?user_id=${user.user_id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ responses: updated }) });
         if (response.ok) {
-          await authFetch(`${API_BASE}/matches/calculate?user_id=${user.user_id}`, { method: "POST" }, token);
+          await authFetch(`${API_BASE}/matches/calculate?user_id=${user.user_id}`, { method: "POST" });
           onComplete(updated);
         } else { alert("Error submitting questionnaire"); setSubmitting(false); }
       } catch (err) { alert("Network error"); setSubmitting(false); }
@@ -910,7 +910,6 @@ function SwipeCard({ match, onSwipe, getInitials, isTop, user, token }) {
   };
 
   const rotation = position.x * 0.03;
-  const opacity = Math.max(0, 1 - Math.abs(position.x) / 400);
   const swipeDirection = position.x > 30 ? "right" : position.x < -30 ? "left" : null;
 
   return (
@@ -997,7 +996,7 @@ function SwipeCard({ match, onSwipe, getInitials, isTop, user, token }) {
   );
 }
 
-function SwipeInterface({ matches, user, setPage, setSelectedMatch, token, setViewMode }) {
+function SwipeInterface({ matches, user, setPage, token, setViewMode }) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [swipedMatches, setSwipedMatches] = useState({ interested: [], passed: [] });
   const [messagePrompt, setMessagePrompt] = useState(null);
@@ -1083,7 +1082,7 @@ function SwipeInterface({ matches, user, setPage, setSelectedMatch, token, setVi
       {/* Mutual match alert */}
       {mutualMatchAlert && (
         <div style={{ position: "fixed", top: 100, left: "50%", transform: "translateX(-50%)", zIndex: 1000, background: `linear-gradient(135deg, ${C.green}, #16A34A)`, color: "white", padding: "16px 32px", borderRadius: 16, fontSize: 16, fontWeight: 700, boxShadow: "0 8px 32px rgba(34,197,94,0.4)", animation: "fadeUp 0.5s ease-out" }}>
-          It's a mutual match with {mutualMatchAlert}!
+          It’s a mutual match with {mutualMatchAlert}!
         </div>
       )}
 
@@ -1219,9 +1218,9 @@ function SwipeInterface({ matches, user, setPage, setSelectedMatch, token, setVi
       ) : (
         <div style={{ textAlign: "center", padding: "60px 20px", maxWidth: 600, margin: "0 auto" }}>
           <div style={{ fontSize: 64, marginBottom: 20 }}>🎉</div>
-          <h2 style={{ fontFamily: font.display, fontSize: 28, fontWeight: 700, marginBottom: 12 }}>You've seen all your matches!</h2>
+          <h2 style={{ fontFamily: font.display, fontSize: 28, fontWeight: 700, marginBottom: 12 }}>You’ve seen all your matches!</h2>
           <p style={{ color: C.textMuted, fontSize: 16, marginBottom: 32 }}>
-            Here's a summary of your swipe session
+            Here’s a summary of your swipe session
           </p>
 
           <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 16, padding: 24, marginBottom: 24 }}>
@@ -1348,7 +1347,7 @@ function CompatibilityBreakdown({ userId, otherUserId, token, overallScore, comp
   useEffect(() => {
     const fetchBreakdown = async () => {
       try {
-        const response = await authFetch(`${API_BASE}/matches/breakdown/${userId}/${otherUserId}`, {}, token);
+        const response = await authFetch(`${API_BASE}/matches/breakdown/${userId}/${otherUserId}`);
         if (response.ok) {
           const data = await response.json();
           setBreakdown(data);
@@ -1462,13 +1461,13 @@ function DashboardPage({ user, setPage, setSelectedMatch, token }) {
   useEffect(() => {
     const fetchMatches = async () => {
       try {
-        const response = await authFetch(`${API_BASE}/matches/${user.user_id}`, {}, token);
+        const response = await authFetch(`${API_BASE}/matches/${user.user_id}`);
         if (response.ok) { const data = await response.json(); setMatches(data); }
       } catch (err) { console.error("Error fetching matches:", err); } finally { setLoading(false); }
     };
     const fetchProfile = async () => {
       try {
-        const response = await authFetch(`${API_BASE}/profile/${user.user_id}`, {}, token);
+        const response = await authFetch(`${API_BASE}/profile/${user.user_id}`);
         if (response.ok) { const data = await response.json(); setProfileData(data); }
       } catch (err) { console.error("Error fetching profile:", err); }
     };
@@ -1632,7 +1631,7 @@ function ProfileEditPage({ user, setPage, onProfileUpdate, token }) {
   useEffect(() => {
     const fetchProfile = async () => {
       try {
-        const response = await authFetch(`${API_BASE}/profile/${user.user_id}`, {}, token);
+        const response = await authFetch(`${API_BASE}/profile/${user.user_id}`);
         if (response.ok) { const data = await response.json(); setBio(data.bio || ""); if (data.profile_pic_url) setPreviewUrl(data.profile_pic_url); }
       } catch (err) { console.error("Error fetching profile:", err); }
     };
@@ -1648,12 +1647,12 @@ function ProfileEditPage({ user, setPage, onProfileUpdate, token }) {
     setLoading(true); setSuccess(false);
     try {
       if (bio !== undefined) {
-        const res = await authFetch(`${API_BASE}/profile/update?user_id=${user.user_id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bio }) }, token);
+        const res = await authFetch(`${API_BASE}/profile/update?user_id=${user.user_id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bio }) });
         if (!res.ok) { alert("Couldn't save your bio. Please try again."); return; }
       }
       if (profilePicture) {
         const formData = new FormData(); formData.append("file", profilePicture);
-        const res = await authFetch(`${API_BASE}/profile/upload-picture?user_id=${user.user_id}`, { method: "POST", body: formData }, token);
+        const res = await authFetch(`${API_BASE}/profile/upload-picture?user_id=${user.user_id}`, { method: "POST", body: formData });
         if (!res.ok) { alert("Couldn't upload your photo. Please try again."); return; }
       }
       setSuccess(true); onProfileUpdate(); setTimeout(() => setPage("dashboard"), 1500);
@@ -1700,24 +1699,24 @@ function MessagesPage({ user, selectedMatch, setPage, token }) {
   const [profileModalData, setProfileModalData] = useState(null);
   const messagesEndRef = useRef(null);
 
-  useEffect(() => { if (selectedMatch) { setSelectedUser(selectedMatch); fetchThread(selectedMatch.user_id); } }, [selectedMatch]);
-  useEffect(() => { fetchConversations(); const interval = setInterval(fetchConversations, 5000); return () => clearInterval(interval); }, [user.user_id]);
-  useEffect(() => { if (selectedUser) { const interval = setInterval(() => fetchThread(selectedUser.user_id), 3000); return () => clearInterval(interval); } }, [selectedUser]);
+  const fetchConversations = useCallback(async () => {
+    try { const response = await authFetch(`${API_BASE}/messages/conversations/${user.user_id}`); if (response.ok) { const data = await response.json(); setConversations(data); } } catch (err) { console.error("Error fetching conversations:", err); }
+  }, [user.user_id]);
+
+  const fetchThread = useCallback(async (otherUserId) => {
+    try { const response = await authFetch(`${API_BASE}/messages/thread/${user.user_id}/${otherUserId}`); if (response.ok) { const data = await response.json(); setMessages(data); } } catch (err) { console.error("Error fetching thread:", err); }
+  }, [user.user_id]);
+
+  useEffect(() => { if (selectedMatch) { setSelectedUser(selectedMatch); fetchThread(selectedMatch.user_id); } }, [selectedMatch, fetchThread]);
+  useEffect(() => { fetchConversations(); const interval = setInterval(fetchConversations, 5000); return () => clearInterval(interval); }, [fetchConversations]);
+  useEffect(() => { if (selectedUser) { const interval = setInterval(() => fetchThread(selectedUser.user_id), 3000); return () => clearInterval(interval); } }, [selectedUser, fetchThread]);
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
-
-  const fetchConversations = async () => {
-    try { const response = await authFetch(`${API_BASE}/messages/conversations/${user.user_id}`, {}, token); if (response.ok) { const data = await response.json(); setConversations(data); } } catch (err) { console.error("Error fetching conversations:", err); }
-  };
-
-  const fetchThread = async (otherUserId) => {
-    try { const response = await authFetch(`${API_BASE}/messages/thread/${user.user_id}/${otherUserId}`, {}, token); if (response.ok) { const data = await response.json(); setMessages(data); } } catch (err) { console.error("Error fetching thread:", err); }
-  };
 
   const sendMessage = async () => {
     if (!newMessage.trim() || !selectedUser) return;
     setLoading(true);
     try {
-      const response = await authFetch(`${API_BASE}/messages/send?sender_id=${user.user_id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ recipient_id: selectedUser.user_id, content: newMessage }) }, token);
+      const response = await authFetch(`${API_BASE}/messages/send?sender_id=${user.user_id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ recipient_id: selectedUser.user_id, content: newMessage }) });
       if (response.ok) { setNewMessage(""); fetchThread(selectedUser.user_id); fetchConversations(); }
     } catch (err) { console.error("Error sending message:", err); } finally { setLoading(false); }
   };
@@ -1726,7 +1725,7 @@ function MessagesPage({ user, selectedMatch, setPage, token }) {
 
   const handleViewProfile = async (targetUser) => {
     try {
-      const response = await authFetch(`${API_BASE}/profile/${targetUser.user_id}`, {}, token);
+      const response = await authFetch(`${API_BASE}/profile/${targetUser.user_id}`);
       if (response.ok) {
         const profileData = await response.json();
         setProfileModalData({ ...targetUser, ...profileData });
@@ -1886,7 +1885,7 @@ export default function App() {
     if (user && token) {
       applyTheme(user.university);
       const fetchUnread = async () => {
-        try { const response = await authFetch(`${API_BASE}/messages/conversations/${user.user_id}`, {}, token); if (response.ok) { const data = await response.json(); const total = data.reduce((sum, conv) => sum + conv.unread_count, 0); setUnreadCount(total); } } catch (err) { console.error("Error fetching unread count:", err); }
+        try { const response = await authFetch(`${API_BASE}/messages/conversations/${user.user_id}`); if (response.ok) { const data = await response.json(); const total = data.reduce((sum, conv) => sum + conv.unread_count, 0); setUnreadCount(total); } } catch (err) { console.error("Error fetching unread count:", err); }
       };
       fetchUnread();
       const interval = setInterval(fetchUnread, 10000);
@@ -1921,7 +1920,7 @@ export default function App() {
       {page === "signup" && <AuthPage mode="signup" setPage={setPage} setPendingEmail={rememberPendingEmail} onAuth={handleAuth} />}
       {page === "login" && <AuthPage mode="login" setPage={setPage} setPendingEmail={rememberPendingEmail} onAuth={handleAuth} />}
       {page === "verify" && <VerificationPage email={pendingEmail} setPage={setPage} onAuth={handleAuth} onCancel={() => rememberPendingEmail("")} />}
-      {page === "questionnaire" && <QuestionnairePage setPage={setPage} onComplete={handleQuestionnaireComplete} user={user} token={token} />}
+      {page === "questionnaire" && <QuestionnairePage onComplete={handleQuestionnaireComplete} user={user} />}
       {page === "dashboard" && <DashboardPage user={user} setPage={setPage} setSelectedMatch={setSelectedMatch} token={token} />}
       {page === "profile" && <ProfileEditPage user={user} setPage={setPage} onProfileUpdate={handleProfileUpdate} token={token} />}
       {page === "messages" && <MessagesPage user={user} selectedMatch={selectedMatch} setPage={setPage} token={token} />}
