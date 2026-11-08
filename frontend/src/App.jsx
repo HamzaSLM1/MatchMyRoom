@@ -54,6 +54,27 @@ const authFetch = async (url, options = {}, token) => {
   return response;
 };
 
+const AUTH_ERROR_MESSAGES = {
+  otp_expired: "That code expired or was replaced by a newer one. Request a new code.",
+  over_email_send_rate_limit: "Too many emails were sent to this address. Wait a few minutes, then request a new code.",
+  over_request_rate_limit: "Too many attempts. Wait a minute and try again.",
+  email_address_not_authorized: "We can't send email to this address right now. Try again later.",
+};
+const authErrorMessage = (error) => AUTH_ERROR_MESSAGES[error?.code] || error?.message || "Something went wrong. Please try again.";
+
+// Survives a reload or tab discard while the user goes to their inbox for the code.
+const PENDING_EMAIL_KEY = "mmr_pending_email";
+const readPendingEmail = () => { try { return sessionStorage.getItem(PENDING_EMAIL_KEY) || ""; } catch { return ""; } };
+const writePendingEmail = (email) => {
+  try {
+    if (email) sessionStorage.setItem(PENDING_EMAIL_KEY, email);
+    else sessionStorage.removeItem(PENDING_EMAIL_KEY);
+  } catch { /* storage unavailable (private mode); verification still works in this page load */ }
+};
+
+// Supabase rejects a new signup email to the same address within 60s.
+const RESEND_COOLDOWN_SECONDS = 60;
+
 // ─── Theme ───
 const C = {
   bg: "#0C0A09",
@@ -442,7 +463,7 @@ function AuthPage({ mode, setPage, setPendingEmail, onAuth }) {
           }
         });
         if (signUpError) {
-          setError(signUpError.message);
+          setError(authErrorMessage(signUpError));
           setLoading(false);
           return;
         }
@@ -482,15 +503,16 @@ function AuthPage({ mode, setPage, setPendingEmail, onAuth }) {
           password
         });
         if (signInError) {
-          // An account that was created but never verified can't log in. Send them
-          // to the verify page (which can resend a code) instead of a dead end.
-          if (/email not confirmed/i.test(signInError.message)) {
+          // An account that was created but never verified can't log in. Its original
+          // code may be long expired, so send a fresh one before showing the verify page.
+          if (signInError.code === "email_not_confirmed") {
+            await supabase.auth.resend({ type: "signup", email: cleanEmail });
             setPendingEmail(cleanEmail);
             setPage("verify");
             setLoading(false);
             return;
           }
-          setError(signInError.message);
+          setError(authErrorMessage(signInError));
           setLoading(false);
           return;
         }
@@ -546,11 +568,21 @@ function AuthPage({ mode, setPage, setPendingEmail, onAuth }) {
   );
 }
 
-function VerificationPage({ email, setPage, onAuth }) {
+function VerificationPage({ email, setPage, onAuth, onCancel }) {
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
+  // A code was just sent by signup or login, so the first resend has to wait too.
+  const [cooldown, setCooldown] = useState(RESEND_COOLDOWN_SECONDS);
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const t = setTimeout(() => setCooldown(c => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
 
   const handleVerify = async () => {
     setError("");
@@ -565,19 +597,21 @@ function VerificationPage({ email, setPage, onAuth }) {
       });
 
       if (verifyError) {
-        setError(verifyError.message);
+        setError(authErrorMessage(verifyError));
         setLoading(false);
         return;
       }
 
       if (data.session) {
         setSuccess(true);
+        setSigningIn(true);
         const name = data.user?.user_metadata?.name || "User";
         const syncRes = await fetch(`${API_BASE}/auth/sync-user?name=${encodeURIComponent(name)}`, {
           method: "POST",
           headers: { "Authorization": `Bearer ${data.session.access_token}` }
         });
         if (!syncRes.ok) {
+          setSigningIn(false);
           setError("Account verified but sync failed. Please log in.");
           setLoading(false);
           setTimeout(() => setPage("login"), 2000);
@@ -604,16 +638,21 @@ function VerificationPage({ email, setPage, onAuth }) {
   };
 
   const handleResend = async () => {
+    if (cooldown > 0) return;
     setError("");
+    setNotice("");
     setLoading(true);
     try {
       const { error: resendError } = await supabase.auth.resend({
         type: 'signup',
         email,
       });
-      
+
       if (resendError) {
-        setError(resendError.message);
+        setError(authErrorMessage(resendError));
+      } else {
+        setNotice("New code sent. Use the newest code, older ones stop working.");
+        setCooldown(RESEND_COOLDOWN_SECONDS);
       }
       setLoading(false);
     } catch (err) {
@@ -641,7 +680,7 @@ function VerificationPage({ email, setPage, onAuth }) {
           <div style={{ padding: "20px", borderRadius: 12, background: "rgba(34, 197, 94, 0.1)", border: "1px solid rgba(34, 197, 94, 0.3)", textAlign: "center" }}>
             <div style={{ fontSize: 32, marginBottom: 8 }}>✅</div>
             <div style={{ color: "#22C55E", fontWeight: 600 }}>Email verified!</div>
-            <div style={{ color: C.textMuted, fontSize: 13, marginTop: 4 }}>Redirecting to login...</div>
+            <div style={{ color: C.textMuted, fontSize: 13, marginTop: 4 }}>{signingIn ? "Signing you in..." : "Redirecting to login..."}</div>
           </div>
         ) : (
           <>
@@ -661,14 +700,19 @@ function VerificationPage({ email, setPage, onAuth }) {
               </div>
 
               {error && (
-                <div style={{ padding: "12px 16px", borderRadius: 10, background: "rgba(237,27,47,0.1)", border: "1px solid rgba(237,27,47,0.2)", color: C.mcgillRed, fontSize: 14 }}>
+                <div role="alert" style={{ padding: "12px 16px", borderRadius: 10, background: "rgba(237,27,47,0.1)", border: "1px solid rgba(237,27,47,0.2)", color: C.mcgillRed, fontSize: 14 }}>
                   {error}
                 </div>
               )}
+              {notice && !error && (
+                <div role="status" style={{ padding: "12px 16px", borderRadius: 10, background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.3)", color: "#22C55E", fontSize: 14 }}>
+                  {notice}
+                </div>
+              )}
 
-              <button 
-                className="btn-primary" 
-                style={{ width: "100%", padding: "15px", marginTop: 8, opacity: loading ? 0.7 : 1 }} 
+              <button
+                className="btn-primary"
+                style={{ width: "100%", padding: "15px", marginTop: 8, opacity: loading ? 0.7 : 1 }}
                 onClick={handleVerify} 
                 disabled={loading || code.length !== 6}
               >
@@ -680,28 +724,28 @@ function VerificationPage({ email, setPage, onAuth }) {
               <p style={{ fontSize: 13, color: C.textMuted }}>
                 Didn't receive the code?
               </p>
-              <button 
+              <button
                 onClick={handleResend}
-                disabled={loading}
-                style={{ 
+                disabled={loading || cooldown > 0}
+                style={{
                   marginTop: 8,
                   background: "none",
                   border: "none",
-                  color: C.accent,
-                  cursor: "pointer",
+                  color: cooldown > 0 ? C.textDim : C.accent,
+                  cursor: cooldown > 0 ? "default" : "pointer",
                   fontSize: 14,
                   fontWeight: 600,
-                  textDecoration: "underline"
+                  textDecoration: cooldown > 0 ? "none" : "underline"
                 }}
               >
-                Resend code
+                {cooldown > 0 ? `Resend code in ${cooldown}s` : "Resend code"}
               </button>
             </div>
 
             <div style={{ textAlign: "center", marginTop: 24, fontSize: 14, color: C.textMuted }}>
               <span 
-                style={{ color: C.accent, cursor: "pointer", fontWeight: 500 }} 
-                onClick={() => setPage("login")}
+                style={{ color: C.accent, cursor: "pointer", fontWeight: 500 }}
+                onClick={() => { onCancel(); setPage("login"); }}
               >
                 ← Back to login
               </span>
@@ -1782,13 +1826,16 @@ function MessagesPage({ user, selectedMatch, setPage, token }) {
 }
 
 export default function App() {
-  const [page, setPage] = useState("landing");
+  const [pendingEmail, setPendingEmail] = useState(readPendingEmail);
+  const [page, setPage] = useState(() => (pendingEmail ? "verify" : "landing"));
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(null);
   const [selectedMatch, setSelectedMatch] = useState(null);
   const [unreadCount, setUnreadCount] = useState(0);
-  const [pendingEmail, setPendingEmail] = useState("");
-  const [devCode, setDevCode] = useState("");
+  const rememberPendingEmail = (email) => {
+    writePendingEmail(email);
+    setPendingEmail(email);
+  };
 
   const syncSession = async (session) => {
     try {
@@ -1828,7 +1875,8 @@ export default function App() {
       } else {
         setToken(null);
         setUser(null);
-        setPage("landing");
+        // Fires with no session on every load; don't bounce someone mid-verification.
+        setPage(p => (p === "verify" ? p : "landing"));
       }
     });
     return () => subscription.unsubscribe();
@@ -1847,6 +1895,7 @@ export default function App() {
   }, [user, token]);
 
   const handleAuth = (userData) => {
+    rememberPendingEmail("");
     const authToken = userData.token;
     setToken(authToken);
     setUser(userData);
@@ -1869,9 +1918,9 @@ export default function App() {
       <NavBar page={page} setPage={(p) => { if (p === "landing") handleLogout(); else setPage(p); }} isLoggedIn={isLoggedIn} user={user} unreadCount={unreadCount} />
       {page === "landing" && <LandingPage setPage={setPage} />}
       {page === "tos" && <TermsOfServicePage setPage={setPage} />}
-      {page === "signup" && <AuthPage mode="signup" setPage={setPage} setPendingEmail={setPendingEmail} setDevCode={setDevCode} onAuth={handleAuth} />}
-      {page === "login" && <AuthPage mode="login" setPage={setPage} setPendingEmail={setPendingEmail} setDevCode={setDevCode} onAuth={handleAuth} />}
-      {page === "verify" && <VerificationPage email={pendingEmail} setPage={setPage} onAuth={handleAuth} />}
+      {page === "signup" && <AuthPage mode="signup" setPage={setPage} setPendingEmail={rememberPendingEmail} onAuth={handleAuth} />}
+      {page === "login" && <AuthPage mode="login" setPage={setPage} setPendingEmail={rememberPendingEmail} onAuth={handleAuth} />}
+      {page === "verify" && <VerificationPage email={pendingEmail} setPage={setPage} onAuth={handleAuth} onCancel={() => rememberPendingEmail("")} />}
       {page === "questionnaire" && <QuestionnairePage setPage={setPage} onComplete={handleQuestionnaireComplete} user={user} token={token} />}
       {page === "dashboard" && <DashboardPage user={user} setPage={setPage} setSelectedMatch={setSelectedMatch} token={token} />}
       {page === "profile" && <ProfileEditPage user={user} setPage={setPage} onProfileUpdate={handleProfileUpdate} token={token} />}
