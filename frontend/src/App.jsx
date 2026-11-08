@@ -303,9 +303,9 @@ function Logo({ size = 28, university = "mcgill" }) {
 
 function NavBar({ setPage, isLoggedIn, user, unreadCount = 0 }) {
   return (
-    <nav style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 100, padding: "16px 32px", background: "rgba(12,10,9,0.92)", backdropFilter: "blur(24px) saturate(180%)", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", boxShadow: "0 4px 24px rgba(0,0,0,0.2)" }}>
+    <nav className="nav-bar" style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 100, padding: "16px 32px", background: "rgba(12,10,9,0.92)", backdropFilter: "blur(24px) saturate(180%)", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", boxShadow: "0 4px 24px rgba(0,0,0,0.2)" }}>
       <div onClick={() => setPage("landing")} style={{ transition: "transform 0.2s ease" }} onMouseEnter={(e) => e.currentTarget.style.transform = "scale(1.05)"} onMouseLeave={(e) => e.currentTarget.style.transform = "scale(1)"}><Logo university={user?.university} /></div>
-      <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+      <div className="nav-links" style={{ display: "flex", gap: 12, alignItems: "center" }}>
         {isLoggedIn ? (
           <>
             <button className="btn-secondary" style={{ padding: "10px 20px", fontSize: 14 }} onClick={() => setPage("dashboard")}>Dashboard</button>
