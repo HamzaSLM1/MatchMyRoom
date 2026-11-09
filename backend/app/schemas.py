@@ -1,6 +1,7 @@
 from pydantic import BaseModel, EmailStr, field_validator, Field, ConfigDict
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime
+from uuid import UUID
 
 
 # ─── Profile Schemas ───
@@ -64,7 +65,7 @@ class MatchResponse(BaseModel):
 
 # ─── Message Schemas ───
 class MessageSendRequest(BaseModel):
-    recipient_id: str
+    recipient_id: UUID
     content: str = Field(..., min_length=1, max_length=10000)
 
     @field_validator("content")
@@ -97,7 +98,7 @@ class ConversationPreview(BaseModel):
 
 # ─── Swipe/Like Schemas ───
 class SwipeRequest(BaseModel):
-    liked_user_id: str
+    liked_user_id: UUID
     is_like: bool  # True for right swipe (like), False for left swipe (pass)
 
 
@@ -120,7 +121,7 @@ class SwipeHistoryItem(BaseModel):
 
 
 class SendInitialMessageRequest(BaseModel):
-    recipient_id: str
+    recipient_id: UUID
     content: str = Field(..., min_length=1, max_length=10000)
 
     @field_validator("content")
@@ -133,9 +134,9 @@ class SendInitialMessageRequest(BaseModel):
 
 # ─── Agent 2 Schemas ───
 class BlockRequest(BaseModel):
-    blocked_user_id: str
+    blocked_user_id: UUID
 
 
 class ReportRequest(BaseModel):
-    reported_user_id: str
+    reported_user_id: UUID
     reason: str = Field(..., min_length=1, max_length=500)

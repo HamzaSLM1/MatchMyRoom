@@ -206,6 +206,17 @@ class TestGetMatches:
         client.post(f"/api/matches/calculate?user_id={user.id}", headers=auth_header(user.id, user.email))
         assert db_session.query(Match).count() == 0
 
+    def test_each_side_sees_the_other_user(self, client, create_user_with_questionnaire):
+        # Match rows store user1 = min(id); whichever side is user1 must still get the other person.
+        a = create_user_with_questionnaire(name="Alice", email="alice@mcgill.ca")
+        b = create_user_with_questionnaire(name="Bob", email="bob@mcgill.ca")
+        client.post(f"/api/matches/calculate?user_id={a.id}", headers=auth_header(a.id, a.email))
+
+        for me, other in ((a, b), (b, a)):
+            resp = client.get(f"/api/matches/{me.id}", headers=auth_header(me.id, me.email))
+            assert resp.status_code == 200
+            assert [m["user_id"] for m in resp.json()] == [str(other.id)]
+
     def test_get_matches(self, client, create_user_with_questionnaire):
         u1 = create_user_with_questionnaire(name="M1", email="m1@mcgill.ca")
         u2 = create_user_with_questionnaire(name="M2", email="m2@mcgill.ca")
