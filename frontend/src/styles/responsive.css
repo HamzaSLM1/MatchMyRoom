@@ -2,6 +2,10 @@
 /* Tablet: 768px | Mobile: 480px */
 
 /* ─── NavBar ─── */
+.nav-links button {
+  white-space: nowrap;
+}
+
 @media (max-width: 768px) {
   .nav-links {
     gap: 8px !important;
